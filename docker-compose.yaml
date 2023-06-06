@@ -1,0 +1,15 @@
+version: '3'
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "666:666"
+    volumes:
+      - ${DATA_VOLUME}:/app/data:ro
+      - ./app/templates/file_browser.html:/app/templates/file_browser.html
+      - ./app/app.py:/app/app.py
+    command: uvicorn app:app --host 0.0.0.0 --port 666 --reload
+    env_file:
+      - .env

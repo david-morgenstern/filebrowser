@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>File Browser</title>
+    <link href="{{ url_for('static', path='custom.css') }}" rel="stylesheet">
+    <link rel="icon" href="{{ url_for('static', path='favicon.ico') }}" type="image/x-icon">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            $(".sortable").click(function() {
+                var $this = $(this);
+                var sortKey = $this.data("sort-key");
+                var sortOrder = $this.hasClass("asc") ? "desc" : "asc";
+
+                $(".sortable").removeClass("asc desc");
+                $this.addClass(sortOrder);
+
+                sortFileList(sortKey, sortOrder);
+            });
+
+            function sortFileList(sortKey, sortOrder) {
+                var $fileList = $(".file-list");
+                var $files = $fileList.children("li:not(.static-row)");
+
+                $files.sort(function(a, b) {
+                    var aValue = $(a).data(sortKey);
+                    var bValue = $(b).data(sortKey);
+
+                    if (sortOrder === "asc") {
+                        return aValue.localeCompare(bValue);
+                    } else {
+                        return bValue.localeCompare(aValue);
+                    }
+                });
+
+                $.each($files, function(index, item) {
+                    $fileList.append(item);
+                });
+            }
+            $(".browse-btn").click(function(e) {
+                history.replaceState(null, null, window.location.href.split('#')[0]);
+                e.preventDefault();
+                var currentUrl = window.location.href;
+                var directoryName = $(this).closest("li").data("name");
+                var browseUrl = currentUrl + "/" + directoryName;
+                window.location.href = browseUrl;
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>File Browser</h1>
+        <ul class="file-list">
+            <li class="static-row">
+                <div class="file-name sortable" data-sort-key="name">File Name <i class="fas fa-sort"></i></div>
+                <div class="file-size">File Size</div>
+            </li>
+            {% for file in files %}
+            <li data-name="{{ file.name }}">
+                <div class="file-name">{{ file.name }}</div>
+                <div class="file-size">{{ file.size|filesizeformat }}</div>
+                <div class="action">
+                    <form action="/download" method="post">
+                        <input type="hidden" name="file_path" value="{{ file.path }}">
+                        <input type="hidden" name="file_name" value="{{ file.name }}">
+                        <button type="submit" class="download-btn"><i class="fas fa-download"></i></button>
+                    </form>
+                </div>
+            </li>
+            {% endfor %}
+            {% for directory in directories %}
+            <li data-name="{{ directory.name }}">
+                <div class="file-name">{{ directory.name }}</div>
+                <div class="action">
+                    <a href="{{ url_for('browse_directory', directories=directory.name) }}" class="browse-btn"><i class="fas fa-folder"></i></a>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+</body>
+</html>
