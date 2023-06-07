@@ -74,6 +74,11 @@
             <li data-name="{{ directory.name }}">
                 <div class="file-name">{{ directory.name }}</div>
                 <div class="action">
+                    <form action="/download" method="post">
+                        <input type="hidden" name="file_path" value="{{ directory.path }}">
+                        <input type="hidden" name="file_name" value="{{ directory.name }}">
+                        <button type="submit" class="download-btn"><i class="fas fa-download"></i></button>
+                    </form>
                     <a href="{{ url_for('browse_directory', directories=directory.name) }}" class="browse-btn"><i class="fas fa-folder"></i></a>
                 </div>
             </li>
