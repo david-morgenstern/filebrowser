@@ -19,20 +19,6 @@ app.mount("/data", StaticFiles(directory="/app/data"), name="data")
 templates = Jinja2Templates(directory="/app/templates")
 
 
-@app.get('/pictures')
-def view_pictures(request: Request):
-    picture_files = []
-    picture_extensions = (".jpg", ".jpeg")
-    for entry in os.scandir('/app/data'):
-        if entry.is_file() and entry.name.lower().endswith(picture_extensions):
-            file_data = {
-                'name': entry.name,
-                'path': entry.path
-            }
-            picture_files.append(file_data)
-    return templates.TemplateResponse("picture_viewer.html",
-                                      {"request": request, "picture_files": picture_files, "current_page": "picture_viewer"})
-
 @app.post('/download')
 async def download_file(request: Request):
     form_data = await request.form()
@@ -80,12 +66,35 @@ async def download_file(request: Request):
 @app.get('/')
 @app.get('/{directories:path}')
 def browse_directory(request: Request, directories: str):
+    show_pictures = False
+    if directories.endswith("pictures"):
+        directories = directories.rstrip("pictures")
+        directories = directories.rstrip("/")
+        show_pictures = True
+
     browse_directory_path = '/app/data' + directories
     if not os.path.isdir(browse_directory_path):
         raise HTTPException(status_code=500, detail='Invalid directory path')
 
+    picture_extensions = (".jpg", ".jpeg")
+    picture_files = []
+
+    # Check if the URL ends with "/pictures"
+    if show_pictures:
+        for entry in os.scandir(browse_directory_path):
+            if entry.is_file() and entry.name.lower().endswith(picture_extensions):
+                file_data = {
+                    'name': entry.name,
+                    'path': entry.path
+                }
+                picture_files.append(file_data)
+        return templates.TemplateResponse(
+            "picture_viewer.html",
+            {"request": request, "picture_files": picture_files, "current_page": "picture_viewer"}
+        )
+
     files = []
-    directories = []
+    subdirectories = []
     for entry in os.scandir(browse_directory_path):
         if entry.is_file():
             file_data = {
@@ -95,6 +104,8 @@ def browse_directory(request: Request, directories: str):
             }
             files.append(file_data)
         else:
-            directories.append(entry)
-    return templates.TemplateResponse("file_browser.html",
-                                      {"request": request, "files": files, "directories": directories, "current_page": "file_browser"})
+            subdirectories.append(entry)
+    return templates.TemplateResponse(
+        "file_browser.html",
+        {"request": request, "files": files, "directories": subdirectories, "current_page": "file_browser"}
+    )

@@ -37,6 +37,20 @@
             background-color: #4CAF50;
         }
     </style>
+    <script>
+        // JavaScript function to handle click event on the "Picture Viewer" link
+        function addOrRemovePicturesFromUrl() {
+            var currentUrl = window.location.href;
+            var picturesSuffix = '/pictures';
+            var newUrl;
+            if (currentUrl.endsWith(picturesSuffix)) {
+                newUrl = currentUrl.slice(0, -picturesSuffix.length);
+            } else {
+                newUrl = currentUrl.endsWith('/') ? currentUrl + 'pictures' : currentUrl + '/pictures';
+            }
+            window.location.href = newUrl;
+        }
+    </script>
 </head>
 <body>
     <div class="navigation-bar">
@@ -44,8 +58,18 @@
             <a href="{{ url_for('browse_directory', directories='') }}" {% if current_page == 'file_browser' %}class="active"{% endif %}>File Browser</a>
         </div>
         <div class="nav-item">
-            <a href="{{ url_for('view_pictures') }}" {% if current_page == 'picture_viewer' %}class="active"{% endif %}>Picture Viewer</a>
+            <!-- Call the JavaScript function on click -->
+            <a href="javascript:void(0);" onclick="addOrRemovePicturesFromUrl()" {% if current_page == 'picture_viewer' %}class="active"{% endif %}>Picture Viewer</a>
         </div>
     </div>
+    <script>
+        function goBack() {
+            var currentPath = window.location.pathname;
+            var pathSegments = currentPath.split('/');
+            var newPath = pathSegments.slice(0, -1).join('/');
+            var newUrl = window.location.origin + newPath;
+            window.location.href = newUrl;
+        }
+    </script>
 </body>
 </html>
