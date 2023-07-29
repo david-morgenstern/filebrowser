@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Picture Viewer</title>
+    <link href="{{ url_for('static', path='custom.css') }}" rel="stylesheet">
+    <link rel="icon" href="{{ url_for('static', path='favicon.ico') }}" type="image/x-icon">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <style>
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+        .grid-item img {
+            width: 100%;
+            cursor: pointer;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1;
+            padding-top: 100px;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0, 0, 0, 0.9);
+        }
+        .modal-content {
+            margin: auto;
+            display: block;
+            max-width: 90%;
+            max-height: 90%;
+        }
+    </style>
+    <script>
+        $(document).ready(function() {
+            var modal = document.getElementById('myModal');
+            var modalImg = document.getElementById('modalImg');
+            var currentIndex = -1;
+            var pictureFiles = [{% for file in picture_files %}"{{ file.name }}"{% if not loop.last %},{% endif %}{% endfor %}];
+
+            function openModal(index) {
+                currentIndex = index;
+                modal.style.display = "block";
+                modalImg.src = "{{ url_for('data', path='') }}" + pictureFiles[currentIndex];
+            }
+
+            function closeModal() {
+                modal.style.display = "none";
+                currentIndex = -1;
+            }
+
+            $('.grid-item img').click(function() {
+                var index = $(this).parent().index();
+                openModal(index);
+            });
+
+            $('.close').click(function() {
+                closeModal();
+            });
+
+            $(document).keydown(function(event) {
+                if (modal.style.display === "block") {
+                    if (event.keyCode === 27) { // "Esc" key
+                        closeModal();
+                    } else if (event.keyCode === 37) { // Left arrow key
+                        currentIndex = (currentIndex - 1 + pictureFiles.length) % pictureFiles.length;
+                        modalImg.src = "{{ url_for('data', path='') }}" + pictureFiles[currentIndex];
+                    } else if (event.keyCode === 39) { // Right arrow key
+                        currentIndex = (currentIndex + 1) % pictureFiles.length;
+                        modalImg.src = "{{ url_for('data', path='') }}" + pictureFiles[currentIndex];
+                    }
+                }
+            });
+        });
+    </script>
+</head>
+<body>
+    {% include "navigation_bar.html" %}
+    <div class="grid-container">
+        {% for file in picture_files %}
+        <div class="grid-item">
+            <!-- Modify the src attribute to use the /data route -->
+            <img src="{{ url_for('data', path=file.name) }}" alt="{{ file.name }}">
+        </div>
+        {% endfor %}
+    </div>
+
+    <div id="myModal" class="modal">
+        <span class="close">&times;</span>
+        <img class="modal-content" id="modalImg">
+    </div>
+</body>
+</html>

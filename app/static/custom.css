@@ -68,3 +68,22 @@ h1 {
 .download-btn i {
     font-size: 16px;
 }
+
+/* custom.css */
+.navigation-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #f0f0f0;
+    padding: 10px;
+}
+
+.nav-item a {
+    color: #333;
+    text-decoration: none;
+    padding: 5px 10px;
+}
+
+.nav-item a:hover {
+    background-color: #ddd;
+}

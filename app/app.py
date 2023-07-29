@@ -15,9 +15,23 @@ app = FastAPI()
 
 static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
+app.mount("/data", StaticFiles(directory="/app/data"), name="data")
 templates = Jinja2Templates(directory="/app/templates")
 
+
+@app.get('/pictures')
+def view_pictures(request: Request):
+    picture_files = []
+    picture_extensions = (".jpg", ".jpeg")
+    for entry in os.scandir('/app/data'):
+        if entry.is_file() and entry.name.lower().endswith(picture_extensions):
+            file_data = {
+                'name': entry.name,
+                'path': entry.path
+            }
+            picture_files.append(file_data)
+    return templates.TemplateResponse("picture_viewer.html",
+                                      {"request": request, "picture_files": picture_files, "current_page": "picture_viewer"})
 
 @app.post('/download')
 async def download_file(request: Request):
@@ -83,4 +97,4 @@ def browse_directory(request: Request, directories: str):
         else:
             directories.append(entry)
     return templates.TemplateResponse("file_browser.html",
-                                      {"request": request, "files": files, "directories": directories})
+                                      {"request": request, "files": files, "directories": directories, "current_page": "file_browser"})
