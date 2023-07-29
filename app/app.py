@@ -76,7 +76,7 @@ def browse_directory(request: Request, directories: str):
     if not os.path.isdir(browse_directory_path):
         raise HTTPException(status_code=500, detail='Invalid directory path')
 
-    picture_extensions = (".jpg", ".jpeg")
+    picture_extensions = (".jpg", ".jpeg", ".JPG")
     picture_files = []
 
     # Check if the URL ends with "/pictures"
@@ -84,9 +84,10 @@ def browse_directory(request: Request, directories: str):
         for entry in os.scandir(browse_directory_path):
             if entry.is_file() and entry.name.lower().endswith(picture_extensions):
                 file_data = {
-                    'name': entry.name,
+                    'name': browse_directory_path.split("/")[-1] + "/"+ entry.name,
                     'path': entry.path
                 }
+                print(file_data)
                 picture_files.append(file_data)
         return templates.TemplateResponse(
             "picture_viewer.html",
