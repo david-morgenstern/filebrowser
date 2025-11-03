@@ -143,39 +143,107 @@
             }
         });
 
+        // Get MIME type from filename
+        function getMimeType(filename) {
+            const ext = filename.toLowerCase().split('.').pop();
+            const mimeTypes = {
+                // Video
+                'mp4': 'video/mp4', 'm4v': 'video/mp4', 'webm': 'video/webm',
+                'mkv': 'video/x-matroska', 'avi': 'video/x-msvideo',
+                'mov': 'video/quicktime', 'flv': 'video/x-flv', 'wmv': 'video/x-ms-wmv',
+                // Audio
+                'mp3': 'audio/mpeg', 'm4a': 'audio/mp4', 'aac': 'audio/aac',
+                'wav': 'audio/wav', 'flac': 'audio/flac', 'ogg': 'audio/ogg',
+                'oga': 'audio/ogg', 'opus': 'audio/opus'
+            };
+            return mimeTypes[ext] || '';
+        }
+
         // View file
         function viewFile(path, type, name) {
             const modal = document.getElementById('modal');
             const content = document.getElementById('modalContent');
 
-            const streamUrl = '/stream/' + path;
+            // Properly encode the path for URL
+            const encodedPath = path.split('/').map(p => encodeURIComponent(p)).join('/');
+            const streamUrl = '/stream/' + encodedPath;
+            const mimeType = getMimeType(name);
+
+            console.log('Opening file:', {path, type, name, streamUrl, mimeType});
 
             if (type === 'image') {
-                content.innerHTML = `<img src="${streamUrl}" alt="${name}">`;
+                content.innerHTML = `<img src="${streamUrl}" alt="${escapeHtml(name)}" onerror="console.error('Failed to load image:', this.src)">`;
             } else if (type === 'video') {
-                content.innerHTML = `
-                    <video controls autoplay>
-                        <source src="${streamUrl}">
-                    </video>
-                    <div class="media-info">${name}</div>
-                `;
+                // Create video element WITHOUT innerHTML to avoid timing issues
+                const videoContainer = document.createElement('div');
+
+                const video = document.createElement('video');
+                video.id = 'videoPlayer';
+                video.controls = true;
+                video.preload = 'auto';
+                video.style.cssText = 'width: 100%; height: auto; background: #000;';
+
+                // Set source directly on video element, NOT via source tag
+                video.src = streamUrl;
+                video.type = mimeType;
+
+                const info = document.createElement('div');
+                info.className = 'media-info';
+                info.textContent = name;
+
+                videoContainer.appendChild(video);
+                videoContainer.appendChild(info);
+
+                content.innerHTML = '';
+                content.appendChild(videoContainer);
+
+                // Add event listeners for debugging
+                video.addEventListener('loadstart', () => console.log('✓ Video: Load started'));
+                video.addEventListener('loadedmetadata', () => console.log('✓ Video: Metadata loaded, duration:', video.duration));
+                video.addEventListener('loadeddata', () => console.log('✓ Video: Data loaded'));
+                video.addEventListener('canplay', () => console.log('✓ Video: Can play'));
+                video.addEventListener('playing', () => console.log('✓ Video: Playing'));
+                video.addEventListener('error', (e) => {
+                    console.error('✗ Video error:', e, video.error);
+                    if (video.error) {
+                        console.error('Error code:', video.error.code, 'Message:', video.error.message);
+                        // Error codes: 1=ABORTED, 2=NETWORK, 3=DECODE, 4=SRC_NOT_SUPPORTED
+                    }
+                });
+
+                console.log('Video element created, src:', streamUrl);
             } else if (type === 'audio') {
-                content.innerHTML = `
-                    <audio controls autoplay>
-                        <source src="${streamUrl}">
+                const audioHtml = `
+                    <audio id="audioPlayer" controls preload="auto" style="width: 100%;">
+                        <source src="${streamUrl}" type="${mimeType}">
+                        Your browser does not support the audio tag.
                     </audio>
-                    <div class="media-info">${name}</div>
+                    <div class="media-info">${escapeHtml(name)}</div>
                 `;
+                content.innerHTML = audioHtml;
+
+                const audio = document.getElementById('audioPlayer');
+                audio.addEventListener('error', (e) => {
+                    console.error('Audio error:', e, audio.error);
+                });
+                audio.load();
             } else if (type === 'text') {
-                fetch('/preview/' + path)
-                    .then(r => r.text())
+                fetch('/preview/' + encodedPath)
+                    .then(r => {
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                        return r.text();
+                    })
                     .then(text => {
                         content.innerHTML = `
                             <div class="text-preview">
-                                <div class="text-preview-header">${name}</div>
+                                <div class="text-preview-header">${escapeHtml(name)}</div>
                                 <div class="text-preview-content">${escapeHtml(text)}</div>
                             </div>
                         `;
+                    })
+                    .catch(err => {
+                        console.error('Failed to load text:', err);
+                        content.innerHTML = `<div style="color: white; padding: 2rem;">Error loading file: ${err.message}</div>`;
                     });
             }
 
@@ -184,8 +252,22 @@
 
         function closeModal() {
             const modal = document.getElementById('modal');
+            const content = document.getElementById('modalContent');
+
+            // Stop any playing media
+            const video = document.getElementById('videoPlayer');
+            const audio = document.getElementById('audioPlayer');
+            if (video) {
+                video.pause();
+                video.src = '';
+            }
+            if (audio) {
+                audio.pause();
+                audio.src = '';
+            }
+
             modal.classList.remove('active');
-            document.getElementById('modalContent').innerHTML = '';
+            content.innerHTML = '';
         }
 
         // Click outside to close
