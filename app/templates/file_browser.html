@@ -1,93 +1,203 @@
-<!-- file_browser.html -->
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>File Browser</title>
     <link href="{{ url_for('static', path='custom.css') }}" rel="stylesheet">
     <link rel="icon" href="{{ url_for('static', path='favicon.ico') }}" type="image/x-icon">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
-    <script>
-        $(document).ready(function() {
-            $(".sortable").click(function() {
-                var $this = $(this);
-                var sortKey = $this.data("sort-key");
-                var sortOrder = $this.hasClass("asc") ? "desc" : "asc";
-
-                $(".sortable").removeClass("asc desc");
-                $this.addClass(sortOrder);
-
-                sortFileList(sortKey, sortOrder);
-            });
-
-            function sortFileList(sortKey, sortOrder) {
-                var $fileList = $(".file-list");
-                var $files = $fileList.children("li:not(.static-row)");
-
-                $files.sort(function(a, b) {
-                    var aValue = $(a).data(sortKey);
-                    var bValue = $(b).data(sortKey);
-
-                    if (sortOrder === "asc") {
-                        return aValue.localeCompare(bValue);
-                    } else {
-                        return bValue.localeCompare(aValue);
-                    }
-                });
-
-                $.each($files, function(index, item) {
-                    $fileList.append(item);
-                });
-            }
-            $(".browse-btn").click(function(e) {
-                history.replaceState(null, null, window.location.href.split('#')[0]);
-                e.preventDefault();
-                var currentUrl = window.location.href;
-                var directoryName = $(this).closest("li").data("name");
-                var browseUrl = currentUrl + "/" + directoryName;
-                window.location.href = browseUrl;
-            });
-        });
-    </script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
 <body>
-    {% include "navigation_bar.html" %}
-    <div class="container">
-        <h1>File Browser</h1>
-             <button onclick="goBack()">Back</button>
+    <!-- Header -->
+    <div class="header">
+        <div class="header-content">
+            <div class="logo">
+                <i class="fas fa-folder-open"></i> Files
+            </div>
+            <div class="search-box">
+                <i class="fas fa-search"></i>
+                <input type="text" id="searchInput" placeholder="Search files...">
+            </div>
+        </div>
+    </div>
 
-        <ul class="file-list">
-            <li class="static-row">
-                <div class="file-name sortable" data-sort-key="name">File Name <i class="fas fa-sort"></i></div>
-                <div class="file-size">File Size</div>
-            </li>
-            {% for file in files %}
-            <li data-name="{{ file.name }}">
-                <div class="file-name">{{ file.name }}</div>
-                <div class="file-size">{{ file.size|filesizeformat }}</div>
-                <div class="action">
-                    <form action="/download" method="post">
-                        <input type="hidden" name="file_path" value="{{ file.path }}">
-                        <input type="hidden" name="file_name" value="{{ file.name }}">
-                        <button type="submit" class="download-btn"><i class="fas fa-download"></i></button>
+    <!-- Breadcrumbs -->
+    <div class="breadcrumbs">
+        {% for crumb in breadcrumbs %}
+            <a href="/{{ crumb.path }}" class="{% if loop.last %}active{% endif %}">
+                {% if loop.first %}<i class="fas fa-home"></i>{% endif %}
+                {{ crumb.name }}
+            </a>
+            {% if not loop.last %}
+                <span class="separator">/</span>
+            {% endif %}
+        {% endfor %}
+    </div>
+
+    <!-- Container -->
+    <div class="container">
+        <ul class="file-list" id="fileList">
+            {% if directories|length == 0 and files|length == 0 %}
+            <div class="empty-state">
+                <i class="fas fa-folder-open"></i>
+                <h3>Empty folder</h3>
+            </div>
+            {% endif %}
+
+            <!-- Directories -->
+            {% for directory in directories %}
+            <li data-name="{{ directory.name|lower }}">
+                <div class="file-icon folder">
+                    <i class="fas fa-folder"></i>
+                </div>
+                <div class="file-info">
+                    <div class="file-name">{{ directory.name }}</div>
+                    <div class="file-meta">Folder</div>
+                </div>
+                <div class="file-actions">
+                    <a href="/{{ current_path }}{% if current_path %}/{% endif %}{{ directory.name }}" class="btn-icon" title="Open">
+                        <i class="fas fa-folder-open"></i>
+                    </a>
+                    <form action="/download" method="post" style="display: inline;">
+                        <input type="hidden" name="file_path" value="{{ directory.path }}">
+                        <input type="hidden" name="file_name" value="{{ directory.name }}">
+                        <button type="submit" class="btn-icon" title="Download ZIP">
+                            <i class="fas fa-download"></i>
+                        </button>
                     </form>
                 </div>
             </li>
             {% endfor %}
-            {% for directory in directories %}
-            <li data-name="{{ directory.name }}">
-                <div class="file-name">{{ directory.name }}</div>
-                <div class="action">
-                    <form action="/download" method="post">
-                        <input type="hidden" name="file_path" value="{{ directory.path }}">
-                        <input type="hidden" name="file_name" value="{{ directory.name }}">
-                        <button type="submit" class="download-btn"><i class="fas fa-download"></i></button>
+
+            <!-- Files -->
+            {% for file in files %}
+            <li data-name="{{ file.name|lower }}">
+                <div class="file-icon {{ file.type }}">
+                    {% if file.type == 'video' %}
+                        <i class="fas fa-film"></i>
+                    {% elif file.type == 'image' %}
+                        <i class="fas fa-image"></i>
+                    {% elif file.type == 'audio' %}
+                        <i class="fas fa-music"></i>
+                    {% elif file.type == 'text' %}
+                        <i class="fas fa-file-alt"></i>
+                    {% elif file.type == 'pdf' %}
+                        <i class="fas fa-file-pdf"></i>
+                    {% elif file.type == 'archive' %}
+                        <i class="fas fa-file-archive"></i>
+                    {% else %}
+                        <i class="fas fa-file"></i>
+                    {% endif %}
+                </div>
+                <div class="file-info">
+                    <div class="file-name">{{ file.name }}</div>
+                    <div class="file-meta">{{ file.size|filesizeformat }} • {{ file.type|title }}</div>
+                </div>
+                <div class="file-actions">
+                    {% if file.type in ['video', 'audio', 'image', 'text'] %}
+                    <button class="btn-icon" onclick='viewFile("{{ file.relative_path }}", "{{ file.type }}", "{{ file.name|replace("\"", "\\\"") }}")' title="View">
+                        <i class="fas fa-eye"></i>
+                    </button>
+                    {% endif %}
+                    <form action="/download" method="post" style="display: inline;">
+                        <input type="hidden" name="file_path" value="{{ file.path }}">
+                        <input type="hidden" name="file_name" value="{{ file.name }}">
+                        <button type="submit" class="btn-icon" title="Download">
+                            <i class="fas fa-download"></i>
+                        </button>
                     </form>
-                    <a href="{{ url_for('browse_directory', directories=directory.name) }}" class="browse-btn"><i class="fas fa-folder"></i></a>
                 </div>
             </li>
             {% endfor %}
         </ul>
     </div>
+
+    <!-- Modal -->
+    <div id="modal" class="modal">
+        <button class="modal-close" onclick="closeModal()">×</button>
+        <div class="modal-content" id="modalContent"></div>
+    </div>
+
+    <script>
+        // Search
+        document.getElementById('searchInput').addEventListener('input', function(e) {
+            const search = e.target.value.toLowerCase();
+            document.querySelectorAll('#fileList li[data-name]').forEach(li => {
+                const name = li.dataset.name;
+                li.style.display = name.includes(search) ? '' : 'none';
+            });
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            if (e.key === '/' && e.target.tagName !== 'INPUT') {
+                e.preventDefault();
+                document.getElementById('searchInput').focus();
+            }
+            if (e.key === 'Escape') {
+                closeModal();
+                if (document.activeElement === document.getElementById('searchInput')) {
+                    document.getElementById('searchInput').blur();
+                }
+            }
+        });
+
+        // View file
+        function viewFile(path, type, name) {
+            const modal = document.getElementById('modal');
+            const content = document.getElementById('modalContent');
+
+            const streamUrl = '/stream/' + path;
+
+            if (type === 'image') {
+                content.innerHTML = `<img src="${streamUrl}" alt="${name}">`;
+            } else if (type === 'video') {
+                content.innerHTML = `
+                    <video controls autoplay>
+                        <source src="${streamUrl}">
+                    </video>
+                    <div class="media-info">${name}</div>
+                `;
+            } else if (type === 'audio') {
+                content.innerHTML = `
+                    <audio controls autoplay>
+                        <source src="${streamUrl}">
+                    </audio>
+                    <div class="media-info">${name}</div>
+                `;
+            } else if (type === 'text') {
+                fetch('/preview/' + path)
+                    .then(r => r.text())
+                    .then(text => {
+                        content.innerHTML = `
+                            <div class="text-preview">
+                                <div class="text-preview-header">${name}</div>
+                                <div class="text-preview-content">${escapeHtml(text)}</div>
+                            </div>
+                        `;
+                    });
+            }
+
+            modal.classList.add('active');
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('modal');
+            modal.classList.remove('active');
+            document.getElementById('modalContent').innerHTML = '';
+        }
+
+        // Click outside to close
+        document.getElementById('modal').addEventListener('click', function(e) {
+            if (e.target === this) closeModal();
+        });
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
 </body>
 </html>
