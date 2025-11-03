@@ -19,6 +19,9 @@
                 <i class="fas fa-search"></i>
                 <input type="text" id="searchInput" placeholder="Search files...">
             </div>
+            <button class="btn-icon" onclick="showHistory()" title="Watch History" style="margin-left: auto;">
+                <i class="fas fa-history"></i>
+            </button>
         </div>
     </div>
 
@@ -183,9 +186,29 @@
                 video.preload = 'auto';
                 video.style.cssText = 'width: 100%; height: auto; background: #000;';
 
+                // Check if file extension suggests it might need transcoding
+                const ext = name.toLowerCase().split('.').pop();
+                const needsTranscode = ['avi', 'wmv', 'flv', 'divx'].includes(ext);
+
+                let videoUrl = streamUrl;
+                let videoType = mimeType;
+
+                if (needsTranscode) {
+                    // Use transcode endpoint for potentially unsupported formats
+                    videoUrl = '/transcode/' + encodedPath;
+                    videoType = 'video/mp4';
+                    console.log('Using transcode endpoint for', ext);
+
+                    // Add transcoding notice
+                    const notice = document.createElement('div');
+                    notice.style.cssText = 'background: rgba(33, 150, 243, 0.1); padding: 0.5rem; text-align: center; color: #2196F3; font-size: 0.85rem; margin-bottom: 0.5rem;';
+                    notice.textContent = '⚡ Transcoding video for browser compatibility...';
+                    videoContainer.appendChild(notice);
+                }
+
                 // Set source directly on video element, NOT via source tag
-                video.src = streamUrl;
-                video.type = mimeType;
+                video.src = videoUrl;
+                video.type = videoType;
 
                 const info = document.createElement('div');
                 info.className = 'media-info';
@@ -211,7 +234,7 @@
                     }
                 });
 
-                console.log('Video element created, src:', streamUrl);
+                console.log('Video element created, src:', videoUrl);
             } else if (type === 'audio') {
                 const audioHtml = `
                     <audio id="audioPlayer" controls preload="auto" style="width: 100%;">
@@ -279,6 +302,73 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        // Show watch history
+        async function showHistory() {
+            try {
+                const response = await fetch('/api/history');
+                const data = await response.json();
+
+                const modal = document.getElementById('modal');
+                const content = document.getElementById('modalContent');
+
+                if (data.count === 0) {
+                    content.innerHTML = `
+                        <div class="text-preview">
+                            <div class="text-preview-header">Watch History</div>
+                            <div style="padding: 2rem; text-align: center; color: #666;">
+                                No watch history yet
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    let historyHtml = `
+                        <div class="text-preview">
+                            <div class="text-preview-header">Watch History (${data.count} items)</div>
+                            <div style="padding: 1rem;">
+                                <table style="width: 100%; border-collapse: collapse;">
+                                    <thead>
+                                        <tr style="border-bottom: 2px solid #e0e0e0;">
+                                            <th style="padding: 0.5rem; text-align: left;">File</th>
+                                            <th style="padding: 0.5rem; text-align: left;">Type</th>
+                                            <th style="padding: 0.5rem; text-align: right;">Views</th>
+                                            <th style="padding: 0.5rem; text-align: right;">Last Watched</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                    `;
+
+                    data.history.forEach(item => {
+                        const lastWatched = new Date(item.last_watched).toLocaleString();
+                        const fileType = item.file_type.charAt(0).toUpperCase() + item.file_type.slice(1);
+
+                        historyHtml += `
+                            <tr style="border-bottom: 1px solid #f0f0f0; cursor: pointer;"
+                                onclick='viewFile("${item.file_path}", "${item.file_type}", "${escapeHtml(item.file_name)}")'>
+                                <td style="padding: 0.75rem;">${escapeHtml(item.file_name)}</td>
+                                <td style="padding: 0.75rem;">${fileType}</td>
+                                <td style="padding: 0.75rem; text-align: right;">${item.view_count}</td>
+                                <td style="padding: 0.75rem; text-align: right; font-size: 0.85rem; color: #666;">${lastWatched}</td>
+                            </tr>
+                        `;
+                    });
+
+                    historyHtml += `
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    `;
+
+                    content.innerHTML = historyHtml;
+                }
+
+                modal.classList.add('active');
+            } catch (error) {
+                console.error('Failed to load history:', error);
+                alert('Failed to load watch history');
+            }
         }
     </script>
 </body>

@@ -10,6 +10,11 @@ services:
       - ${DATA_VOLUME}:/app/data:ro
       - ./app/templates/:/app/templates/
       - ./app/app.py:/app/app.py
+      - filebrowser-db:/app/db
     command: uvicorn app:app --host 0.0.0.0 --port 666 --reload
     env_file:
       - .env
+
+volumes:
+  filebrowser-db:
+    driver: local

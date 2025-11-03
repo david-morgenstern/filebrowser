@@ -5,6 +5,11 @@ import mimetypes
 import logging
 import asyncio
 from pathlib import Path
+import sqlite3
+from datetime import datetime
+from contextlib import contextmanager
+import subprocess
+import json
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
@@ -18,7 +23,90 @@ from starlette.responses import StreamingResponse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Database file location (in separate volume)
+DB_PATH = '/app/db/filebrowser_history.db'
+DB_DIR = '/app/db'
+
+@contextmanager
+def get_db():
+    """Context manager for database connections"""
+    # Ensure db directory exists
+    os.makedirs(DB_DIR, exist_ok=True)
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Database error: {e}")
+        raise
+    finally:
+        conn.close()
+
+def init_db():
+    """Initialize the database schema"""
+    try:
+        with get_db() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS watch_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip_address TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    file_type TEXT NOT NULL,
+                    file_size INTEGER,
+                    first_watched TIMESTAMP NOT NULL,
+                    last_watched TIMESTAMP NOT NULL,
+                    view_count INTEGER DEFAULT 1
+                )
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_ip_watched
+                ON watch_history(ip_address, last_watched DESC)
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_file_watched
+                ON watch_history(file_path, last_watched DESC)
+            ''')
+            logger.info("Database initialized successfully at " + DB_PATH)
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+
+def track_view(ip_address: str, file_path: str, file_name: str, file_type: str, file_size: int):
+    """Track a file view in the database"""
+    try:
+        with get_db() as conn:
+            # Check if this IP has watched this file before
+            existing = conn.execute(
+                'SELECT id, view_count FROM watch_history WHERE ip_address = ? AND file_path = ?',
+                (ip_address, file_path)
+            ).fetchone()
+
+            if existing:
+                # Update existing record
+                conn.execute(
+                    'UPDATE watch_history SET last_watched = ?, view_count = ? WHERE id = ?',
+                    (datetime.now(), existing['view_count'] + 1, existing['id'])
+                )
+            else:
+                # Insert new record
+                conn.execute(
+                    '''INSERT INTO watch_history
+                       (ip_address, file_path, file_name, file_type, file_size, first_watched, last_watched)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (ip_address, file_path, file_name, file_type, file_size, datetime.now(), datetime.now())
+                )
+    except Exception as e:
+        logger.error(f"Failed to track view: {e}")
+
 app = FastAPI()
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    init_db()
 
 static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -83,6 +171,136 @@ def get_file_type(filename):
     else:
         return 'file'
 
+def needs_transcoding(file_path):
+    """Check if video needs transcoding based on codec"""
+    try:
+        # Use ffprobe to get video codec
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_streams',
+            '-select_streams', 'v:0',
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+        if result.returncode != 0:
+            logger.error(f"ffprobe failed for {file_path}")
+            return False
+
+        data = json.loads(result.stdout)
+        if not data.get('streams'):
+            return False
+
+        codec = data['streams'][0].get('codec_name', '').lower()
+        logger.info(f"Detected codec: {codec} for {file_path}")
+
+        # Codecs that need transcoding (not supported by browsers)
+        unsupported = ['xvid', 'divx', 'mpeg4', 'msmpeg4', 'wmv', 'flv1', 'vp6']
+
+        return codec in unsupported
+    except Exception as e:
+        logger.error(f"Error checking codec: {e}")
+        return False
+
+
+@app.get('/transcode/{file_path:path}')
+async def transcode_stream(file_path: str, request: Request):
+    """Transcode video on-the-fly to H.264/MP4 for browser compatibility"""
+    full_path = os.path.join('/app/data', file_path)
+    client_ip = request.client.host if request.client else "unknown"
+
+    logger.info(f"=== TRANSCODE REQUEST ===")
+    logger.info(f"Path: {file_path}")
+    logger.info(f"Client IP: {client_ip}")
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail='File not found')
+
+    # Track the view
+    file_name = os.path.basename(file_path)
+    file_type = get_file_type(file_name)
+    file_size = os.path.getsize(full_path)
+    track_view(client_ip, file_path, file_name, file_type, file_size)
+
+    # ffmpeg command to transcode to H.264/AAC/MP4
+    cmd = [
+        'ffmpeg',
+        '-i', full_path,
+        '-c:v', 'libx264',           # H.264 video codec
+        '-preset', 'veryfast',        # Fast encoding
+        '-crf', '23',                 # Quality (lower = better, 18-28 is good)
+        '-c:a', 'aac',                # AAC audio codec
+        '-b:a', '128k',               # Audio bitrate
+        '-movflags', 'frag_keyframe+empty_moov',  # Enable streaming
+        '-f', 'mp4',                  # Output format
+        'pipe:1'                      # Output to stdout
+    ]
+
+    logger.info(f"Starting transcode: {' '.join(cmd)}")
+
+    async def transcode_generator():
+        process = None
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=65536
+            )
+
+            logger.info(f"ffmpeg process started: PID {process.pid}")
+
+            loop = asyncio.get_event_loop()
+
+            while True:
+                # Read in executor to not block event loop
+                chunk = await loop.run_in_executor(None, process.stdout.read, 65536)
+                if not chunk:
+                    break
+                yield chunk
+
+            # Process finished normally
+            process.wait()
+            if process.returncode != 0:
+                error = process.stderr.read().decode('utf-8')
+                logger.error(f"ffmpeg error: {error}")
+            else:
+                logger.info(f"ffmpeg completed successfully")
+
+        except (GeneratorExit, asyncio.CancelledError) as e:
+            # Client disconnected
+            logger.info(f"Client disconnected, killing ffmpeg process (PID {process.pid if process else 'unknown'})")
+            if process and process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        except Exception as e:
+            logger.error(f"Transcode error: {e}")
+            if process and process.poll() is None:
+                process.kill()
+                process.wait()
+        finally:
+            # Always cleanup
+            if process and process.poll() is None:
+                logger.info(f"Cleaning up ffmpeg process (PID {process.pid})")
+                process.kill()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    logger.error(f"ffmpeg process didn't terminate, force killing")
+                    process.kill()
+
+    return StreamingResponse(
+        transcode_generator(),
+        media_type='video/mp4',
+        headers={
+            'Accept-Ranges': 'none',  # Can't seek transcoded stream
+            'Cache-Control': 'no-cache',
+        }
+    )
+
 
 @app.get('/stream/{file_path:path}')
 async def stream_media(file_path: str, request: Request):
@@ -91,9 +309,13 @@ async def stream_media(file_path: str, request: Request):
 
     full_path = os.path.join('/app/data', file_path)
 
+    # Get client IP
+    client_ip = request.client.host if request.client else "unknown"
+
     logger.info(f"=== STREAM REQUEST ===")
     logger.info(f"Path: {file_path}")
     logger.info(f"Full path: {full_path}")
+    logger.info(f"Client IP: {client_ip}")
     logger.info(f"File exists: {os.path.isfile(full_path)}")
     logger.info(f"Range: {request.headers.get('range', 'NO RANGE')}")
 
@@ -103,10 +325,18 @@ async def stream_media(file_path: str, request: Request):
 
     file_size = os.path.getsize(full_path)
     mime_type = get_mime_type(full_path)
+    file_name = os.path.basename(file_path)
+    file_type = get_file_type(file_name)
 
     logger.info(f"File size: {file_size} bytes, MIME: {mime_type}")
 
+    # Get range header
     range_header = request.headers.get('range')
+
+    # Track view only on first request (no range header) or initial range request (starts at 0)
+    if not range_header or range_header.startswith('bytes=0-'):
+        track_view(client_ip, file_path, file_name, file_type, file_size)
+        logger.info(f"Tracked view for {client_ip}")
 
     # Handle range requests
     if range_header:
@@ -224,6 +454,41 @@ async def download_file(request: Request):
 
     else:
         raise HTTPException(status_code=404, detail='File or directory not found')
+
+
+@app.get('/api/history')
+async def get_history(request: Request, limit: int = 50):
+    """Get watch history for the current user's IP"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                '''SELECT file_path, file_name, file_type, file_size,
+                          first_watched, last_watched, view_count
+                   FROM watch_history
+                   WHERE ip_address = ?
+                   ORDER BY last_watched DESC
+                   LIMIT ?''',
+                (client_ip, limit)
+            ).fetchall()
+
+            history = []
+            for row in rows:
+                history.append({
+                    'file_path': row['file_path'],
+                    'file_name': row['file_name'],
+                    'file_type': row['file_type'],
+                    'file_size': row['file_size'],
+                    'first_watched': row['first_watched'],
+                    'last_watched': row['last_watched'],
+                    'view_count': row['view_count']
+                })
+
+            return JSONResponse({'history': history, 'count': len(history)})
+    except Exception as e:
+        logger.error(f"Failed to fetch history: {e}")
+        return JSONResponse({'history': [], 'count': 0, 'error': str(e)})
 
 
 @app.get('/')
