@@ -177,64 +177,89 @@
             if (type === 'image') {
                 content.innerHTML = `<img src="${streamUrl}" alt="${escapeHtml(name)}" onerror="console.error('Failed to load image:', this.src)">`;
             } else if (type === 'video') {
-                // Create video element WITHOUT innerHTML to avoid timing issues
-                const videoContainer = document.createElement('div');
-
-                const video = document.createElement('video');
-                video.id = 'videoPlayer';
-                video.controls = true;
-                video.preload = 'auto';
-                video.style.cssText = 'width: 100%; height: auto; background: #000;';
-
-                // Check if file extension suggests it might need transcoding
+                // Check if file needs transcoding
                 const ext = name.toLowerCase().split('.').pop();
-                const needsTranscode = ['avi', 'wmv', 'flv', 'divx'].includes(ext);
-
-                let videoUrl = streamUrl;
-                let videoType = mimeType;
+                const needsTranscode = ['avi', 'wmv', 'flv'].includes(ext);
 
                 if (needsTranscode) {
-                    // Use transcode endpoint for potentially unsupported formats
-                    videoUrl = '/transcode/' + encodedPath;
-                    videoType = 'video/mp4';
-                    console.log('Using transcode endpoint for', ext);
+                    // Use transcode endpoint with metadata
+                    console.log('Using transcode with metadata for', ext);
 
-                    // Add transcoding notice
-                    const notice = document.createElement('div');
-                    notice.style.cssText = 'background: rgba(33, 150, 243, 0.1); padding: 0.5rem; text-align: center; color: #2196F3; font-size: 0.85rem; margin-bottom: 0.5rem;';
-                    notice.textContent = '⚡ Transcoding video for browser compatibility...';
-                    videoContainer.appendChild(notice);
+                    content.innerHTML = `
+                        <div id="transcodeNotice" style="background: rgba(33, 150, 243, 0.1); padding: 0.5rem; text-align: center; color: #2196F3; font-size: 0.85rem; margin-bottom: 0.5rem;">
+                            ⚡ Loading video metadata...
+                        </div>
+                        <div style="position: relative;">
+                            <video id="videoPlayer" controls preload="auto" style="width: 100%; height: auto; background: #000;">
+                                <source src="/transcode/${encodedPath}" type="video/mp4">
+                                Your browser does not support the video tag.
+                            </video>
+                            <div id="durationDisplay" style="position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 3px; font-size: 14px; display: none;"></div>
+                        </div>
+                        <div class="media-info">${escapeHtml(name)}</div>
+                    `;
+
+                    const video = document.getElementById('videoPlayer');
+                    const notice = document.getElementById('transcodeNotice');
+                    const durationDisplay = document.getElementById('durationDisplay');
+
+                    // Fetch metadata
+                    fetch('/api/video-info/' + encodedPath)
+                        .then(r => r.json())
+                        .then(metadata => {
+                            console.log('Video metadata:', metadata);
+                            const duration = metadata.duration;
+                            const minutes = Math.floor(duration / 60);
+                            const seconds = Math.floor(duration % 60);
+
+                            notice.textContent = `⚡ Streaming ${metadata.codec.toUpperCase()} video (Duration: ${minutes}:${seconds.toString().padStart(2, '0')})`;
+
+                            // Update duration display
+                            video.addEventListener('timeupdate', () => {
+                                const currentMinutes = Math.floor(video.currentTime / 60);
+                                const currentSeconds = Math.floor(video.currentTime % 60);
+                                durationDisplay.textContent = `${currentMinutes}:${currentSeconds.toString().padStart(2, '0')} / ${minutes}:${seconds.toString().padStart(2, '0')}`;
+                                durationDisplay.style.display = 'block';
+                            });
+
+                            // Try to set duration via durationchange event
+                            video.addEventListener('durationchange', () => {
+                                console.log('Duration from video element:', video.duration);
+                                if (video.duration === Infinity || isNaN(video.duration)) {
+                                    // Force set duration using metadata
+                                    console.log('Setting duration from metadata:', duration);
+                                    // Note: We can't directly set video.duration, but we can handle seeking manually
+                                }
+                            });
+                        })
+                        .catch(err => {
+                            console.error('Failed to get video metadata:', err);
+                            notice.textContent = '⚠️ Could not load video metadata';
+                        });
+
+                    // Add event listeners
+                    video.addEventListener('loadedmetadata', () => {
+                        console.log('✓ Video: Metadata loaded, duration:', video.duration);
+                    });
+                    video.addEventListener('error', (e) => {
+                        console.error('✗ Video error:', e, video.error);
+                    });
+                } else {
+                    // Use direct streaming for supported formats
+                    content.innerHTML = `
+                        <video id="videoPlayer" controls preload="auto" style="width: 100%; height: auto; background: #000;">
+                            <source src="${streamUrl}" type="${mimeType}">
+                            Your browser does not support the video tag.
+                        </video>
+                        <div class="media-info">${escapeHtml(name)}</div>
+                    `;
+
+                    const video = document.getElementById('videoPlayer');
+                    video.addEventListener('loadedmetadata', () => console.log('✓ Video: Metadata loaded, duration:', video.duration));
+                    video.addEventListener('error', (e) => console.error('✗ Video error:', e, video.error));
                 }
 
-                // Set source directly on video element, NOT via source tag
-                video.src = videoUrl;
-                video.type = videoType;
-
-                const info = document.createElement('div');
-                info.className = 'media-info';
-                info.textContent = name;
-
-                videoContainer.appendChild(video);
-                videoContainer.appendChild(info);
-
-                content.innerHTML = '';
-                content.appendChild(videoContainer);
-
-                // Add event listeners for debugging
-                video.addEventListener('loadstart', () => console.log('✓ Video: Load started'));
-                video.addEventListener('loadedmetadata', () => console.log('✓ Video: Metadata loaded, duration:', video.duration));
-                video.addEventListener('loadeddata', () => console.log('✓ Video: Data loaded'));
-                video.addEventListener('canplay', () => console.log('✓ Video: Can play'));
-                video.addEventListener('playing', () => console.log('✓ Video: Playing'));
-                video.addEventListener('error', (e) => {
-                    console.error('✗ Video error:', e, video.error);
-                    if (video.error) {
-                        console.error('Error code:', video.error.code, 'Message:', video.error.message);
-                        // Error codes: 1=ABORTED, 2=NETWORK, 3=DECODE, 4=SRC_NOT_SUPPORTED
-                    }
-                });
-
-                console.log('Video element created, src:', videoUrl);
+                console.log('Video element created for', name);
             } else if (type === 'audio') {
                 const audioHtml = `
                     <audio id="audioPlayer" controls preload="auto" style="width: 100%;">

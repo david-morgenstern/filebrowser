@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 DB_PATH = '/app/db/filebrowser_history.db'
 DB_DIR = '/app/db'
 
+# Transcode cache directory
+TRANSCODE_CACHE_DIR = '/app/db/transcode_cache'
+
 @contextmanager
 def get_db():
     """Context manager for database connections"""
@@ -74,6 +77,59 @@ def init_db():
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
 
+def init_transcode_cache():
+    """Initialize transcode cache directory"""
+    os.makedirs(TRANSCODE_CACHE_DIR, exist_ok=True)
+    logger.info(f"Transcode cache directory ready at {TRANSCODE_CACHE_DIR}")
+
+def get_cache_path(file_path):
+    """Get cache file path for a given source file"""
+    import hashlib
+    # Create a hash of the file path + modification time for cache key
+    file_stat = os.stat(file_path)
+    cache_key = f"{file_path}_{file_stat.st_mtime}_{file_stat.st_size}"
+    cache_hash = hashlib.md5(cache_key.encode()).hexdigest()
+    return os.path.join(TRANSCODE_CACHE_DIR, f"{cache_hash}.mp4")
+
+def transcode_to_file(source_path, output_path):
+    """Transcode video file to seekable MP4 format"""
+    logger.info(f"Transcoding {source_path} to {output_path}")
+
+    cmd = [
+        'ffmpeg',
+        '-i', source_path,
+        '-c:v', 'libx264',           # H.264 video codec
+        '-preset', 'medium',          # Balanced speed/quality
+        '-crf', '23',                 # Quality
+        '-c:a', 'aac',                # AAC audio codec
+        '-b:a', '128k',               # Audio bitrate
+        '-movflags', '+faststart',    # Move moov atom to beginning for seeking
+        '-y',                         # Overwrite output file
+        output_path
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 minute timeout
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Transcode failed: {result.stderr}")
+            return False
+
+        logger.info(f"Transcode completed successfully: {output_path}")
+        return True
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"Transcode timeout for {source_path}")
+        return False
+    except Exception as e:
+        logger.error(f"Transcode error: {e}")
+        return False
+
 def track_view(ip_address: str, file_path: str, file_name: str, file_type: str, file_size: int):
     """Track a file view in the database"""
     try:
@@ -107,6 +163,7 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    init_transcode_cache()
 
 static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -171,14 +228,14 @@ def get_file_type(filename):
     else:
         return 'file'
 
-def needs_transcoding(file_path):
-    """Check if video needs transcoding based on codec"""
+def get_video_info(file_path):
+    """Get video metadata including duration and codec"""
     try:
-        # Use ffprobe to get video codec
         cmd = [
             'ffprobe',
             '-v', 'quiet',
             '-print_format', 'json',
+            '-show_format',
             '-show_streams',
             '-select_streams', 'v:0',
             file_path
@@ -187,56 +244,89 @@ def needs_transcoding(file_path):
 
         if result.returncode != 0:
             logger.error(f"ffprobe failed for {file_path}")
-            return False
+            return None
 
         data = json.loads(result.stdout)
-        if not data.get('streams'):
-            return False
 
-        codec = data['streams'][0].get('codec_name', '').lower()
-        logger.info(f"Detected codec: {codec} for {file_path}")
+        info = {
+            'duration': 0,
+            'codec': 'unknown',
+            'needs_transcode': False
+        }
 
-        # Codecs that need transcoding (not supported by browsers)
-        unsupported = ['xvid', 'divx', 'mpeg4', 'msmpeg4', 'wmv', 'flv1', 'vp6']
+        # Get duration from format
+        if 'format' in data and 'duration' in data['format']:
+            info['duration'] = float(data['format']['duration'])
 
-        return codec in unsupported
+        # Get codec from streams
+        if data.get('streams'):
+            codec = data['streams'][0].get('codec_name', '').lower()
+            info['codec'] = codec
+
+            # Codecs that need transcoding (not supported by browsers)
+            unsupported = ['xvid', 'divx', 'mpeg4', 'msmpeg4', 'wmv', 'flv1', 'vp6']
+            info['needs_transcode'] = codec in unsupported
+
+            logger.info(f"Video info: codec={codec}, duration={info['duration']}s, needs_transcode={info['needs_transcode']}")
+
+        return info
     except Exception as e:
-        logger.error(f"Error checking codec: {e}")
-        return False
+        logger.error(f"Error getting video info: {e}")
+        return None
+
+def needs_transcoding(file_path):
+    """Check if video needs transcoding based on codec"""
+    info = get_video_info(file_path)
+    return info['needs_transcode'] if info else False
 
 
 @app.get('/transcode/{file_path:path}')
-async def transcode_stream(file_path: str, request: Request):
-    """Transcode video on-the-fly to H.264/MP4 for browser compatibility"""
+async def transcode_stream(file_path: str, request: Request, start_time: float = 0):
+    """Transcode video on-the-fly to H.264/MP4 for browser compatibility with seeking support"""
     full_path = os.path.join('/app/data', file_path)
     client_ip = request.client.host if request.client else "unknown"
 
     logger.info(f"=== TRANSCODE REQUEST ===")
     logger.info(f"Path: {file_path}")
     logger.info(f"Client IP: {client_ip}")
+    logger.info(f"Start time: {start_time}s")
 
     if not os.path.isfile(full_path):
         raise HTTPException(status_code=404, detail='File not found')
 
-    # Track the view
-    file_name = os.path.basename(file_path)
-    file_type = get_file_type(file_name)
-    file_size = os.path.getsize(full_path)
-    track_view(client_ip, file_path, file_name, file_type, file_size)
+    # Get video info (duration, codec)
+    video_info = get_video_info(full_path)
+    if not video_info:
+        raise HTTPException(status_code=500, detail='Could not read video metadata')
 
-    # ffmpeg command to transcode to H.264/AAC/MP4
-    cmd = [
-        'ffmpeg',
+    duration = video_info['duration']
+    logger.info(f"Video duration: {duration}s")
+
+    # Track the view (only on initial request)
+    if start_time == 0:
+        file_name = os.path.basename(file_path)
+        file_type = get_file_type(file_name)
+        file_size = os.path.getsize(full_path)
+        track_view(client_ip, file_path, file_name, file_type, file_size)
+
+    # Build ffmpeg command with optional start time for seeking
+    cmd = ['ffmpeg']
+
+    # Add start time if seeking
+    if start_time > 0:
+        cmd.extend(['-ss', str(start_time)])
+
+    cmd.extend([
         '-i', full_path,
         '-c:v', 'libx264',           # H.264 video codec
-        '-preset', 'veryfast',        # Fast encoding
+        '-preset', 'ultrafast',       # Fastest encoding for seeking
         '-crf', '23',                 # Quality (lower = better, 18-28 is good)
         '-c:a', 'aac',                # AAC audio codec
         '-b:a', '128k',               # Audio bitrate
-        '-movflags', 'frag_keyframe+empty_moov',  # Enable streaming
+        '-movflags', 'frag_keyframe+empty_moov+faststart',  # Enable streaming & seeking
         '-f', 'mp4',                  # Output format
         'pipe:1'                      # Output to stdout
-    ]
+    ])
 
     logger.info(f"Starting transcode: {' '.join(cmd)}")
 
@@ -292,14 +382,35 @@ async def transcode_stream(file_path: str, request: Request):
                     logger.error(f"ffmpeg process didn't terminate, force killing")
                     process.kill()
 
+    # Estimate content length based on duration and bitrate
+    # Rough estimate: ~500KB/s for video + 16KB/s for audio
+    estimated_size = int(duration * 516000)  # ~516KB/s total
+
     return StreamingResponse(
         transcode_generator(),
         media_type='video/mp4',
         headers={
-            'Accept-Ranges': 'none',  # Can't seek transcoded stream
+            'X-Duration': str(duration),
+            'X-Start-Time': str(start_time),
+            'Content-Length': str(estimated_size),
             'Cache-Control': 'no-cache',
         }
     )
+
+
+@app.get('/api/video-info/{file_path:path}')
+async def get_video_metadata(file_path: str):
+    """Get video metadata (duration, codec, etc.)"""
+    full_path = os.path.join('/app/data', file_path)
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail='File not found')
+
+    info = get_video_info(full_path)
+    if not info:
+        raise HTTPException(status_code=500, detail='Could not read video metadata')
+
+    return JSONResponse(info)
 
 
 @app.get('/stream/{file_path:path}')
