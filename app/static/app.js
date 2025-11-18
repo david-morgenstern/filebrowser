@@ -281,7 +281,7 @@ function createTranscodedVideoPlayer(encodedPath, name) {
 
     // Auto-play
     video.addEventListener('loadeddata', () => {
-        video.play().catch(e => console.log('Auto-play prevented'));
+        if (currentSeekTime === 0) video.play().catch(e => console.log('Auto-play prevented'));
     });
 
     video.addEventListener('error', (e) => console.error('Video error:', e, video.error));

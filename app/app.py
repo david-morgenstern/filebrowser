@@ -455,14 +455,11 @@ async def transcode_stream(file_path: str, request: Request, start_time: float =
 
     cmd = ['ffmpeg']
 
-    # Always use -ss before input for fast seeking
-    if start_time > 0:
-        cmd.extend(['-ss', str(start_time)])
-
-    cmd.extend(['-i', full_path])
-
     if can_copy_video:
-        # Copy video, transcode audio with sync fix
+        # For copy mode: -ss AFTER input maintains A/V sync (slower but correct)
+        cmd.extend(['-i', full_path])
+        if start_time > 0:
+            cmd.extend(['-ss', str(start_time)])
         cmd.extend([
             '-map', '0:v:0',
             '-map', f'0:a:{audio_track}',
@@ -470,10 +467,12 @@ async def transcode_stream(file_path: str, request: Request, start_time: float =
             '-c:a', 'aac',
             '-b:a', '192k',
             '-ac', '2',
-            '-async', '1',
         ])
     else:
-        # Full transcode for incompatible codecs
+        # For transcode: -ss before input is faster
+        if start_time > 0:
+            cmd.extend(['-ss', str(start_time)])
+        cmd.extend(['-i', full_path])
         cmd.extend([
             '-map', '0:v:0',
             '-map', f'0:a:{audio_track}',
