@@ -315,6 +315,44 @@ async def get_subtitle_tracks_endpoint(file_path: str):
     tracks = get_subtitle_tracks(full_path)
     return JSONResponse({'tracks': tracks, 'count': len(tracks)})
 
+@app.get('/api/subtitles/{file_path:path}')
+async def get_subtitles_webvtt(file_path: str, track: int = 0, offset: float = 0):
+    """Extract subtitles as WebVTT format with optional time offset"""
+    full_path = os.path.join(DATA_DIR, file_path)
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail='File not found')
+
+    cmd = ['ffmpeg']
+
+    # Apply offset to shift subtitle timestamps (before input for proper seeking)
+    if offset > 0:
+        cmd.extend(['-ss', str(offset)])
+
+    cmd.extend([
+        '-i', full_path,
+        '-map', f'0:s:{track}',
+        '-c:s', 'webvtt',
+        '-f', 'webvtt',
+        'pipe:1'
+    ])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail='Failed to extract subtitles')
+
+        return Response(
+            content=result.stdout,
+            media_type='text/vtt',
+            headers={'Content-Type': 'text/vtt; charset=utf-8'}
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail='Subtitle extraction timed out')
+    except Exception as e:
+        logger.error(f"Subtitle extraction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get('/api/history')
 async def get_history(request: Request, limit: int = 50):
     """Get watch history for the current user's IP"""
@@ -392,8 +430,8 @@ async def stream_media(file_path: str, request: Request):
     )
 
 @app.get('/transcode/{file_path:path}')
-async def transcode_stream(file_path: str, request: Request, start_time: float = 0, audio_track: int = 0, subtitle_track: int = -1):
-    """Transcode video on-the-fly with seeking, audio track, and subtitle support"""
+async def transcode_stream(file_path: str, request: Request, start_time: float = 0, audio_track: int = 0):
+    """Transcode video on-the-fly with seeking and audio track support"""
     full_path = os.path.join(DATA_DIR, file_path)
     client_ip = request.client.host if request.client else "unknown"
 
@@ -411,34 +449,45 @@ async def transcode_stream(file_path: str, request: Request, start_time: float =
         file_size = os.path.getsize(full_path)
         track_view(client_ip, file_path, file_name, file_type, file_size)
 
+    # Determine if we can copy video or need to transcode
+    compatible_codecs = ['h264', 'avc1', 'hevc', 'h265']
+    can_copy_video = video_info['codec'].lower() in compatible_codecs
+
     cmd = ['ffmpeg']
 
-    # When subtitles are enabled, put -ss after input for correct sync
-    # Otherwise, put -ss before input for faster seeking
-    if start_time > 0 and subtitle_track < 0:
+    # Always use -ss before input for fast seeking
+    if start_time > 0:
         cmd.extend(['-ss', str(start_time)])
 
     cmd.extend(['-i', full_path])
 
-    if start_time > 0 and subtitle_track >= 0:
-        cmd.extend(['-ss', str(start_time)])
-
-    # Build video filter for subtitles if selected
-    if subtitle_track >= 0:
-        # Escape special characters in path for ffmpeg filter
-        escaped_path = full_path.replace('\\', '\\\\').replace(':', '\\:').replace("'", "\\'")
-        subtitle_filter = f"subtitles='{escaped_path}':si={subtitle_track}"
-        cmd.extend(['-vf', subtitle_filter])
+    if can_copy_video:
+        # Copy video, transcode audio with sync fix
+        cmd.extend([
+            '-map', '0:v:0',
+            '-map', f'0:a:{audio_track}',
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-ac', '2',
+            '-async', '1',
+        ])
+    else:
+        # Full transcode for incompatible codecs
+        cmd.extend([
+            '-map', '0:v:0',
+            '-map', f'0:a:{audio_track}',
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-tune', 'zerolatency',
+            '-crf', '28',
+            '-threads', '0',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-ac', '2',
+        ])
 
     cmd.extend([
-        '-map', '0:v:0',
-        '-map', f'0:a:{audio_track}',
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-crf', '23',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        '-ac', '2',
         '-movflags', 'frag_keyframe+empty_moov+faststart',
         '-f', 'mp4',
         'pipe:1'

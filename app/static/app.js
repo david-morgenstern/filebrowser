@@ -67,7 +67,7 @@ function createTranscodedVideoPlayer(encodedPath, name) {
             ⚡ Loading video metadata...
         </div>
         <div style="position: relative;">
-            <video id="videoPlayer" preload="auto" style="width: 100%; height: auto; background: #000; display: block;">
+            <video id="videoPlayer" preload="auto" crossorigin="anonymous" style="width: 100%; height: auto; background: #000; display: block;">
                 <source src="/transcode/${encodedPath}" type="video/mp4">
             </video>
             <div id="customControls" style="background: rgba(0,0,0,0.8); padding: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
@@ -102,10 +102,39 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     const subtitleTrackSelect = document.getElementById('subtitleTrackSelect');
 
     let videoDuration = 0;
-    let currentStartTime = 0;
     let isSeeking = false;
     let currentAudioTrack = 0;
-    let currentSubtitleTrack = -1;
+    let currentSeekTime = 0;
+    let subtitleTracks = [];
+    let selectedSubtitleTrack = -1;
+
+    // Function to load/reload subtitle tracks with time offset
+    function loadSubtitleTracks(offset) {
+        // Remove existing track elements
+        video.querySelectorAll('track').forEach(t => t.remove());
+
+        // Add new tracks with offset
+        subtitleTracks.forEach((track, i) => {
+            const trackEl = document.createElement('track');
+            trackEl.kind = 'subtitles';
+            trackEl.label = track.label;
+            trackEl.srclang = track.language || 'en';
+            trackEl.src = `/api/subtitles/${encodedPath}?track=${track.index}&offset=${offset}`;
+            video.appendChild(trackEl);
+        });
+
+        // Re-enable selected track after tracks are added
+        setTimeout(() => {
+            // First disable all
+            for (let i = 0; i < video.textTracks.length; i++) {
+                video.textTracks[i].mode = 'disabled';
+            }
+            // Then enable selected
+            if (selectedSubtitleTrack >= 0 && video.textTracks[selectedSubtitleTrack]) {
+                video.textTracks[selectedSubtitleTrack].mode = 'showing';
+            }
+        }, 200);
+    }
 
     // Fetch metadata, audio tracks, and subtitle tracks
     Promise.all([
@@ -116,12 +145,14 @@ function createTranscodedVideoPlayer(encodedPath, name) {
         .then(([metadata, audioData, subtitleData]) => {
             videoDuration = metadata.duration;
             totalTimeDisplay.textContent = formatTime(videoDuration);
-            notice.textContent = `⚡ Streaming ${metadata.codec.toUpperCase()} (${formatTime(videoDuration)}) - Click timeline to seek`;
+
+            const copyOrTranscode = metadata.needs_transcode ? 'Transcoding' : 'Remuxing';
+            notice.textContent = `⚡ ${copyOrTranscode} ${metadata.codec.toUpperCase()} (${formatTime(videoDuration)})`;
 
             // Populate audio track selector
             if (audioData.tracks && audioData.tracks.length > 1) {
                 audioTrackSelect.style.display = 'block';
-                audioData.tracks.forEach((track, i) => {
+                audioData.tracks.forEach((track) => {
                     const option = document.createElement('option');
                     option.value = track.index;
                     option.textContent = `🔊 ${track.label}`;
@@ -129,15 +160,19 @@ function createTranscodedVideoPlayer(encodedPath, name) {
                 });
             }
 
-            // Populate subtitle track selector
+            // Store subtitle tracks for later use
             if (subtitleData.tracks && subtitleData.tracks.length > 0) {
+                subtitleTracks = subtitleData.tracks;
                 subtitleTrackSelect.style.display = 'block';
-                subtitleData.tracks.forEach((track, i) => {
+                subtitleData.tracks.forEach((track) => {
+                    // Add option to dropdown
                     const option = document.createElement('option');
                     option.value = track.index;
                     option.textContent = `CC ${track.label}`;
                     subtitleTrackSelect.appendChild(option);
                 });
+                // Load initial subtitle tracks
+                loadSubtitleTracks(0);
             }
         })
         .catch(err => {
@@ -145,35 +180,39 @@ function createTranscodedVideoPlayer(encodedPath, name) {
             notice.textContent = '⚠️ Could not load metadata';
         });
 
-    // Audio track change handler
+    // Audio track change handler - requires reload
     audioTrackSelect.addEventListener('change', () => {
         currentAudioTrack = parseInt(audioTrackSelect.value);
         const wasPlaying = !video.paused;
-        const currentTime = currentStartTime + video.currentTime;
+        const currentTime = currentSeekTime + video.currentTime;
 
         video.pause();
-        currentStartTime = currentTime;
-        video.src = `/transcode/${encodedPath}?start_time=${currentTime}&audio_track=${currentAudioTrack}&subtitle_track=${currentSubtitleTrack}`;
+        currentSeekTime = currentTime;
+        video.src = `/transcode/${encodedPath}?start_time=${currentTime}&audio_track=${currentAudioTrack}`;
         video.load();
+
+        // Reload subtitles with current offset
+        if (subtitleTracks.length > 0) {
+            loadSubtitleTracks(currentTime);
+        }
 
         if (wasPlaying) {
             video.play().catch(e => console.log('Play prevented after audio change'));
         }
     });
 
-    // Subtitle track change handler
+    // Subtitle track change handler - instant, no reload needed
     subtitleTrackSelect.addEventListener('change', () => {
-        currentSubtitleTrack = parseInt(subtitleTrackSelect.value);
-        const wasPlaying = !video.paused;
-        const currentTime = currentStartTime + video.currentTime;
+        selectedSubtitleTrack = parseInt(subtitleTrackSelect.value);
 
-        video.pause();
-        currentStartTime = currentTime;
-        video.src = `/transcode/${encodedPath}?start_time=${currentTime}&audio_track=${currentAudioTrack}&subtitle_track=${currentSubtitleTrack}`;
-        video.load();
+        // Disable all tracks first
+        for (let i = 0; i < video.textTracks.length; i++) {
+            video.textTracks[i].mode = 'disabled';
+        }
 
-        if (wasPlaying) {
-            video.play().catch(e => console.log('Play prevented after subtitle change'));
+        // Enable selected track
+        if (selectedSubtitleTrack >= 0 && video.textTracks[selectedSubtitleTrack]) {
+            video.textTracks[selectedSubtitleTrack].mode = 'showing';
         }
     });
 
@@ -188,9 +227,9 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     // Time update
     video.addEventListener('timeupdate', () => {
         if (!isSeeking && videoDuration > 0) {
-            const adjustedTime = currentStartTime + video.currentTime;
-            seekProgress.style.width = ((adjustedTime / videoDuration) * 100) + '%';
-            currentTimeDisplay.textContent = formatTime(adjustedTime);
+            const actualTime = currentSeekTime + video.currentTime;
+            seekProgress.style.width = ((actualTime / videoDuration) * 100) + '%';
+            currentTimeDisplay.textContent = formatTime(actualTime);
         }
     });
 
@@ -198,8 +237,8 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     video.addEventListener('progress', () => {
         if (video.buffered.length > 0 && videoDuration > 0) {
             const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-            const adjustedBuffered = currentStartTime + bufferedEnd;
-            bufferedProgress.style.width = ((adjustedBuffered / videoDuration) * 100) + '%';
+            const actualBuffered = currentSeekTime + bufferedEnd;
+            bufferedProgress.style.width = ((actualBuffered / videoDuration) * 100) + '%';
         }
     });
 
@@ -215,9 +254,14 @@ function createTranscodedVideoPlayer(encodedPath, name) {
         isSeeking = true;
         video.pause();
 
-        currentStartTime = seekToTime;
-        video.src = `/transcode/${encodedPath}?start_time=${seekToTime}&audio_track=${currentAudioTrack}&subtitle_track=${currentSubtitleTrack}`;
+        currentSeekTime = seekToTime;
+        video.src = `/transcode/${encodedPath}?start_time=${seekToTime}&audio_track=${currentAudioTrack}`;
         video.load();
+
+        // Reload subtitles with new offset
+        if (subtitleTracks.length > 0) {
+            loadSubtitleTracks(seekToTime);
+        }
 
         seekProgress.style.width = (percentage * 100) + '%';
         currentTimeDisplay.textContent = formatTime(seekToTime);
@@ -237,7 +281,7 @@ function createTranscodedVideoPlayer(encodedPath, name) {
 
     // Auto-play
     video.addEventListener('loadeddata', () => {
-        if (currentStartTime === 0) video.play().catch(e => console.log('Auto-play prevented'));
+        video.play().catch(e => console.log('Auto-play prevented'));
     });
 
     video.addEventListener('error', (e) => console.error('Video error:', e, video.error));
