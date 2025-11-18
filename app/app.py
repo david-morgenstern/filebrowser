@@ -171,6 +171,96 @@ def get_video_info(file_path):
         logger.error(f"Error getting video info: {e}")
         return None
 
+def get_audio_tracks(file_path):
+    """Get list of audio tracks from video file"""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-select_streams', 'a',
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+        if result.returncode != 0:
+            logger.error(f"ffprobe audio tracks failed for {file_path}")
+            return []
+
+        data = json.loads(result.stdout)
+        tracks = []
+
+        for i, stream in enumerate(data.get('streams', [])):
+            track_info = {
+                'index': i,
+                'stream_index': stream.get('index', i),
+                'codec': stream.get('codec_name', 'unknown'),
+                'channels': stream.get('channels', 2),
+                'sample_rate': stream.get('sample_rate', ''),
+                'language': stream.get('tags', {}).get('language', ''),
+                'title': stream.get('tags', {}).get('title', ''),
+            }
+
+            # Build display label
+            label_parts = []
+            if track_info['language']:
+                label_parts.append(track_info['language'].upper())
+            if track_info['title']:
+                label_parts.append(track_info['title'])
+            if track_info['channels']:
+                ch = track_info['channels']
+                ch_label = '5.1' if ch == 6 else '7.1' if ch == 8 else f'{ch}ch'
+                label_parts.append(ch_label)
+
+            track_info['label'] = ' - '.join(label_parts) if label_parts else f'Track {i + 1}'
+            tracks.append(track_info)
+
+        return tracks
+    except Exception as e:
+        logger.error(f"Error getting audio tracks: {e}")
+        return []
+
+def get_subtitle_tracks(file_path):
+    """Get list of subtitle tracks from video file"""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-select_streams', 's',
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+        if result.returncode != 0:
+            logger.error(f"ffprobe subtitle tracks failed for {file_path}")
+            return []
+
+        data = json.loads(result.stdout)
+        tracks = []
+
+        for i, stream in enumerate(data.get('streams', [])):
+            track_info = {
+                'index': i,
+                'stream_index': stream.get('index', i),
+                'codec': stream.get('codec_name', 'unknown'),
+                'language': stream.get('tags', {}).get('language', ''),
+                'title': stream.get('tags', {}).get('title', ''),
+            }
+
+            # Build display label
+            label_parts = []
+            if track_info['language']:
+                label_parts.append(track_info['language'].upper())
+            if track_info['title']:
+                label_parts.append(track_info['title'])
+            if not label_parts:
+                label_parts.append(f'Track {i + 1}')
+
+            track_info['label'] = ' - '.join(label_parts)
+            tracks.append(track_info)
+
+        return tracks
+    except Exception as e:
+        logger.error(f"Error getting subtitle tracks: {e}")
+        return []
+
 # ============================================
 # FastAPI App Setup
 # ============================================
@@ -202,6 +292,28 @@ async def get_video_metadata(file_path: str):
         raise HTTPException(status_code=500, detail='Could not read video metadata')
 
     return JSONResponse(info)
+
+@app.get('/api/audio-tracks/{file_path:path}')
+async def get_audio_tracks_endpoint(file_path: str):
+    """Get available audio tracks for a video file"""
+    full_path = os.path.join(DATA_DIR, file_path)
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail='File not found')
+
+    tracks = get_audio_tracks(full_path)
+    return JSONResponse({'tracks': tracks, 'count': len(tracks)})
+
+@app.get('/api/subtitle-tracks/{file_path:path}')
+async def get_subtitle_tracks_endpoint(file_path: str):
+    """Get available subtitle tracks for a video file"""
+    full_path = os.path.join(DATA_DIR, file_path)
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail='File not found')
+
+    tracks = get_subtitle_tracks(full_path)
+    return JSONResponse({'tracks': tracks, 'count': len(tracks)})
 
 @app.get('/api/history')
 async def get_history(request: Request, limit: int = 50):
@@ -280,8 +392,8 @@ async def stream_media(file_path: str, request: Request):
     )
 
 @app.get('/transcode/{file_path:path}')
-async def transcode_stream(file_path: str, request: Request, start_time: float = 0):
-    """Transcode video on-the-fly with seeking support"""
+async def transcode_stream(file_path: str, request: Request, start_time: float = 0, audio_track: int = 0, subtitle_track: int = -1):
+    """Transcode video on-the-fly with seeking, audio track, and subtitle support"""
     full_path = os.path.join(DATA_DIR, file_path)
     client_ip = request.client.host if request.client else "unknown"
 
@@ -300,16 +412,33 @@ async def transcode_stream(file_path: str, request: Request, start_time: float =
         track_view(client_ip, file_path, file_name, file_type, file_size)
 
     cmd = ['ffmpeg']
-    if start_time > 0:
+
+    # When subtitles are enabled, put -ss after input for correct sync
+    # Otherwise, put -ss before input for faster seeking
+    if start_time > 0 and subtitle_track < 0:
         cmd.extend(['-ss', str(start_time)])
 
+    cmd.extend(['-i', full_path])
+
+    if start_time > 0 and subtitle_track >= 0:
+        cmd.extend(['-ss', str(start_time)])
+
+    # Build video filter for subtitles if selected
+    if subtitle_track >= 0:
+        # Escape special characters in path for ffmpeg filter
+        escaped_path = full_path.replace('\\', '\\\\').replace(':', '\\:').replace("'", "\\'")
+        subtitle_filter = f"subtitles='{escaped_path}':si={subtitle_track}"
+        cmd.extend(['-vf', subtitle_filter])
+
     cmd.extend([
-        '-i', full_path,
+        '-map', '0:v:0',
+        '-map', f'0:a:{audio_track}',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-crf', '23',
         '-c:a', 'aac',
-        '-b:a', '128k',
+        '-b:a', '192k',
+        '-ac', '2',
         '-movflags', 'frag_keyframe+empty_moov+faststart',
         '-f', 'mp4',
         'pipe:1'

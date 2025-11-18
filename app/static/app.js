@@ -70,14 +70,19 @@ function createTranscodedVideoPlayer(encodedPath, name) {
             <video id="videoPlayer" preload="auto" style="width: 100%; height: auto; background: #000; display: block;">
                 <source src="/transcode/${encodedPath}" type="video/mp4">
             </video>
-            <div id="customControls" style="background: rgba(0,0,0,0.8); padding: 10px; display: flex; align-items: center; gap: 10px;">
+            <div id="customControls" style="background: rgba(0,0,0,0.8); padding: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                 <button id="playPauseBtn" style="background: #2196F3; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer;">Play</button>
                 <span id="currentTime" style="color: white; font-size: 14px; min-width: 45px;">0:00</span>
-                <div id="seekBar" style="flex: 1; height: 8px; background: rgba(255,255,255,0.3); border-radius: 4px; cursor: pointer; position: relative;">
+                <div id="seekBar" style="flex: 1; height: 8px; background: rgba(255,255,255,0.3); border-radius: 4px; cursor: pointer; position: relative; min-width: 100px;">
                     <div id="bufferedProgress" style="position: absolute; top: 0; height: 100%; background: rgba(255,255,255,0.5); border-radius: 4px; width: 0%;"></div>
                     <div id="seekProgress" style="position: relative; height: 100%; background: #2196F3; border-radius: 4px; width: 0%;"></div>
                 </div>
                 <span id="totalTime" style="color: white; font-size: 14px; min-width: 45px;">0:00</span>
+                <select id="audioTrackSelect" style="background: #333; color: white; border: 1px solid #555; padding: 5px; border-radius: 3px; cursor: pointer; display: none;">
+                </select>
+                <select id="subtitleTrackSelect" style="background: #333; color: white; border: 1px solid #555; padding: 5px; border-radius: 3px; cursor: pointer; display: none;">
+                    <option value="-1">CC Off</option>
+                </select>
                 <button id="fullscreenBtn" style="background: #2196F3; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer;">Fullscreen</button>
             </div>
         </div>
@@ -93,23 +98,84 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     const currentTimeDisplay = document.getElementById('currentTime');
     const totalTimeDisplay = document.getElementById('totalTime');
     const fullscreenBtn = document.getElementById('fullscreenBtn');
+    const audioTrackSelect = document.getElementById('audioTrackSelect');
+    const subtitleTrackSelect = document.getElementById('subtitleTrackSelect');
 
     let videoDuration = 0;
     let currentStartTime = 0;
     let isSeeking = false;
+    let currentAudioTrack = 0;
+    let currentSubtitleTrack = -1;
 
-    // Fetch metadata
-    fetch('/api/video-info/' + encodedPath)
-        .then(r => r.json())
-        .then(metadata => {
+    // Fetch metadata, audio tracks, and subtitle tracks
+    Promise.all([
+        fetch('/api/video-info/' + encodedPath).then(r => r.json()),
+        fetch('/api/audio-tracks/' + encodedPath).then(r => r.json()),
+        fetch('/api/subtitle-tracks/' + encodedPath).then(r => r.json())
+    ])
+        .then(([metadata, audioData, subtitleData]) => {
             videoDuration = metadata.duration;
             totalTimeDisplay.textContent = formatTime(videoDuration);
             notice.textContent = `⚡ Streaming ${metadata.codec.toUpperCase()} (${formatTime(videoDuration)}) - Click timeline to seek`;
+
+            // Populate audio track selector
+            if (audioData.tracks && audioData.tracks.length > 1) {
+                audioTrackSelect.style.display = 'block';
+                audioData.tracks.forEach((track, i) => {
+                    const option = document.createElement('option');
+                    option.value = track.index;
+                    option.textContent = `🔊 ${track.label}`;
+                    audioTrackSelect.appendChild(option);
+                });
+            }
+
+            // Populate subtitle track selector
+            if (subtitleData.tracks && subtitleData.tracks.length > 0) {
+                subtitleTrackSelect.style.display = 'block';
+                subtitleData.tracks.forEach((track, i) => {
+                    const option = document.createElement('option');
+                    option.value = track.index;
+                    option.textContent = `CC ${track.label}`;
+                    subtitleTrackSelect.appendChild(option);
+                });
+            }
         })
         .catch(err => {
             console.error('Failed to get metadata:', err);
             notice.textContent = '⚠️ Could not load metadata';
         });
+
+    // Audio track change handler
+    audioTrackSelect.addEventListener('change', () => {
+        currentAudioTrack = parseInt(audioTrackSelect.value);
+        const wasPlaying = !video.paused;
+        const currentTime = currentStartTime + video.currentTime;
+
+        video.pause();
+        currentStartTime = currentTime;
+        video.src = `/transcode/${encodedPath}?start_time=${currentTime}&audio_track=${currentAudioTrack}&subtitle_track=${currentSubtitleTrack}`;
+        video.load();
+
+        if (wasPlaying) {
+            video.play().catch(e => console.log('Play prevented after audio change'));
+        }
+    });
+
+    // Subtitle track change handler
+    subtitleTrackSelect.addEventListener('change', () => {
+        currentSubtitleTrack = parseInt(subtitleTrackSelect.value);
+        const wasPlaying = !video.paused;
+        const currentTime = currentStartTime + video.currentTime;
+
+        video.pause();
+        currentStartTime = currentTime;
+        video.src = `/transcode/${encodedPath}?start_time=${currentTime}&audio_track=${currentAudioTrack}&subtitle_track=${currentSubtitleTrack}`;
+        video.load();
+
+        if (wasPlaying) {
+            video.play().catch(e => console.log('Play prevented after subtitle change'));
+        }
+    });
 
     // Play/Pause
     playPauseBtn.addEventListener('click', () => {
@@ -150,7 +216,7 @@ function createTranscodedVideoPlayer(encodedPath, name) {
         video.pause();
 
         currentStartTime = seekToTime;
-        video.src = '/transcode/' + encodedPath + '?start_time=' + seekToTime;
+        video.src = `/transcode/${encodedPath}?start_time=${seekToTime}&audio_track=${currentAudioTrack}&subtitle_track=${currentSubtitleTrack}`;
         video.load();
 
         seekProgress.style.width = (percentage * 100) + '%';
