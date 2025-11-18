@@ -66,8 +66,8 @@ function createTranscodedVideoPlayer(encodedPath, name) {
         <div id="transcodeNotice" style="background: rgba(33, 150, 243, 0.1); padding: 0.5rem; text-align: center; color: #2196F3; font-size: 0.85rem; margin-bottom: 0.5rem;">
             ⚡ Loading video metadata...
         </div>
-        <div style="position: relative;">
-            <video id="videoPlayer" preload="auto" crossorigin="anonymous" style="width: 100%; height: auto; background: #000; display: block;">
+        <div id="videoContainer" style="position: relative; background: #000;">
+            <video id="videoPlayer" preload="auto" crossorigin="anonymous" style="width: 100%; height: auto; background: #000; display: block; margin: auto;">
                 <source src="/transcode/${encodedPath}" type="video/mp4">
             </video>
             <div id="customControls" style="background: rgba(0,0,0,0.8); padding: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
@@ -315,9 +315,82 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     });
 
     // Fullscreen
+    const videoContainer = document.getElementById('videoContainer');
+
     fullscreenBtn.addEventListener('click', () => {
-        const container = video.parentElement;
-        document.fullscreenElement ? document.exitFullscreen() : container.requestFullscreen();
+        if (document.fullscreenElement) {
+            document.exitFullscreen();
+        } else {
+            videoContainer.requestFullscreen();
+        }
+    });
+
+    // Handle fullscreen style changes
+    const customControls = document.getElementById('customControls');
+    let hideControlsTimeout = null;
+
+    function showControls() {
+        customControls.style.opacity = '1';
+        customControls.style.pointerEvents = 'auto';
+        videoContainer.style.cursor = 'default';
+    }
+
+    function hideControls() {
+        if (document.fullscreenElement === videoContainer) {
+            customControls.style.opacity = '0';
+            customControls.style.pointerEvents = 'none';
+            videoContainer.style.cursor = 'none';
+        }
+    }
+
+    function resetHideTimer() {
+        showControls();
+        if (hideControlsTimeout) clearTimeout(hideControlsTimeout);
+        if (document.fullscreenElement === videoContainer) {
+            hideControlsTimeout = setTimeout(hideControls, 3000);
+        }
+    }
+
+    videoContainer.addEventListener('mousemove', resetHideTimer);
+    videoContainer.addEventListener('click', resetHideTimer);
+
+    document.addEventListener('fullscreenchange', () => {
+        if (document.fullscreenElement === videoContainer) {
+            videoContainer.style.display = 'flex';
+            videoContainer.style.flexDirection = 'column';
+            videoContainer.style.justifyContent = 'center';
+            videoContainer.style.alignItems = 'center';
+            videoContainer.style.height = '100vh';
+            videoContainer.style.width = '100vw';
+            video.style.width = '100%';
+            video.style.height = '100%';
+            video.style.maxHeight = 'calc(100vh - 50px)';
+            video.style.objectFit = 'contain';
+            customControls.style.transition = 'opacity 0.3s';
+            customControls.style.position = 'absolute';
+            customControls.style.bottom = '0';
+            customControls.style.left = '0';
+            customControls.style.right = '0';
+            resetHideTimer();
+        } else {
+            videoContainer.style.display = '';
+            videoContainer.style.flexDirection = '';
+            videoContainer.style.justifyContent = '';
+            videoContainer.style.alignItems = '';
+            videoContainer.style.height = '';
+            videoContainer.style.width = '';
+            video.style.width = '100%';
+            video.style.height = 'auto';
+            video.style.maxHeight = '';
+            video.style.objectFit = '';
+            customControls.style.transition = '';
+            customControls.style.position = '';
+            customControls.style.bottom = '';
+            customControls.style.left = '';
+            customControls.style.right = '';
+            showControls();
+            if (hideControlsTimeout) clearTimeout(hideControlsTimeout);
+        }
     });
 
     // Auto-play
