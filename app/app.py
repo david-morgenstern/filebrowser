@@ -315,6 +315,47 @@ async def get_subtitle_tracks_endpoint(file_path: str):
     tracks = get_subtitle_tracks(full_path)
     return JSONResponse({'tracks': tracks, 'count': len(tracks)})
 
+@app.get('/api/adjacent-videos/{file_path:path}')
+async def get_adjacent_videos(file_path: str):
+    """Get previous and next video files in the same directory"""
+    full_path = os.path.join(DATA_DIR, file_path)
+    dir_path = os.path.dirname(full_path)
+    file_name = os.path.basename(full_path)
+
+    if not os.path.isdir(dir_path):
+        raise HTTPException(status_code=404, detail='Directory not found')
+
+    # Video extensions
+    video_exts = {'.mp4', '.m4v', '.webm', '.mkv', '.avi', '.mov', '.flv', '.wmv'}
+
+    # Get all video files in directory, sorted
+    videos = []
+    for f in os.listdir(dir_path):
+        ext = os.path.splitext(f)[1].lower()
+        if ext in video_exts:
+            videos.append(f)
+    videos.sort(key=lambda x: x.lower())
+
+    # Find current file index
+    try:
+        current_idx = videos.index(file_name)
+    except ValueError:
+        return JSONResponse({'prev': None, 'next': None})
+
+    # Get adjacent files
+    prev_file = videos[current_idx - 1] if current_idx > 0 else None
+    next_file = videos[current_idx + 1] if current_idx < len(videos) - 1 else None
+
+    # Build relative paths
+    dir_relative = os.path.dirname(file_path)
+    prev_path = os.path.join(dir_relative, prev_file) if prev_file else None
+    next_path = os.path.join(dir_relative, next_file) if next_file else None
+
+    return JSONResponse({
+        'prev': {'path': prev_path, 'name': prev_file} if prev_file else None,
+        'next': {'path': next_path, 'name': next_file} if next_file else None
+    })
+
 @app.get('/api/subtitles/{file_path:path}')
 async def get_subtitles_webvtt(file_path: str, track: int = 0, offset: float = 0):
     """Extract subtitles as WebVTT format with optional time offset"""
@@ -325,7 +366,7 @@ async def get_subtitles_webvtt(file_path: str, track: int = 0, offset: float = 0
 
     cmd = ['ffmpeg']
 
-    # Apply offset to shift subtitle timestamps (before input for proper seeking)
+    # Apply offset to shift subtitle timestamps (before input for fast seeking)
     if offset > 0:
         cmd.extend(['-ss', str(offset)])
 
@@ -456,10 +497,17 @@ async def transcode_stream(file_path: str, request: Request, start_time: float =
     cmd = ['ffmpeg']
 
     if can_copy_video:
-        # For copy mode: -ss AFTER input maintains A/V sync (slower but correct)
-        cmd.extend(['-i', full_path])
+        # For copy mode: use hybrid seek (fast coarse + accurate fine)
         if start_time > 0:
-            cmd.extend(['-ss', str(start_time)])
+            coarse_seek = max(0, start_time - 30)
+            fine_seek = start_time - coarse_seek
+            if coarse_seek > 0:
+                cmd.extend(['-ss', str(coarse_seek)])
+            cmd.extend(['-i', full_path])
+            if fine_seek > 0:
+                cmd.extend(['-ss', str(fine_seek)])
+        else:
+            cmd.extend(['-i', full_path])
         cmd.extend([
             '-map', '0:v:0',
             '-map', f'0:a:{audio_track}',
@@ -467,9 +515,10 @@ async def transcode_stream(file_path: str, request: Request, start_time: float =
             '-c:a', 'aac',
             '-b:a', '192k',
             '-ac', '2',
+            '-avoid_negative_ts', 'make_zero',
         ])
     else:
-        # For transcode: -ss before input is faster
+        # For transcode: -ss before input is fast and accurate
         if start_time > 0:
             cmd.extend(['-ss', str(start_time)])
         cmd.extend(['-i', full_path])

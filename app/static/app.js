@@ -71,7 +71,9 @@ function createTranscodedVideoPlayer(encodedPath, name) {
                 <source src="/transcode/${encodedPath}" type="video/mp4">
             </video>
             <div id="customControls" style="background: rgba(0,0,0,0.8); padding: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                <button id="prevBtn" style="background: #555; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; display: none;" title="Previous">⏮</button>
                 <button id="playPauseBtn" style="background: #2196F3; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer;">Play</button>
+                <button id="nextBtn" style="background: #555; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; display: none;" title="Next">⏭</button>
                 <span id="currentTime" style="color: white; font-size: 14px; min-width: 45px;">0:00</span>
                 <div id="seekBar" style="flex: 1; height: 8px; background: rgba(255,255,255,0.3); border-radius: 4px; cursor: pointer; position: relative; min-width: 100px;">
                     <div id="bufferedProgress" style="position: absolute; top: 0; height: 100%; background: rgba(255,255,255,0.5); border-radius: 4px; width: 0%;"></div>
@@ -92,6 +94,8 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     const video = document.getElementById('videoPlayer');
     const notice = document.getElementById('transcodeNotice');
     const playPauseBtn = document.getElementById('playPauseBtn');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
     const seekBar = document.getElementById('seekBar');
     const seekProgress = document.getElementById('seekProgress');
     const bufferedProgress = document.getElementById('bufferedProgress');
@@ -107,6 +111,43 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     let currentSeekTime = 0;
     let subtitleTracks = [];
     let selectedSubtitleTrack = -1;
+    let adjacentVideos = { prev: null, next: null };
+
+    // Fetch adjacent videos for navigation
+    fetch('/api/adjacent-videos/' + encodedPath)
+        .then(r => r.json())
+        .then(data => {
+            adjacentVideos = data;
+            if (data.prev) {
+                prevBtn.style.display = 'inline-block';
+                prevBtn.title = `Previous: ${data.prev.name}`;
+            }
+            if (data.next) {
+                nextBtn.style.display = 'inline-block';
+                nextBtn.title = `Next: ${data.next.name}`;
+            }
+        })
+        .catch(err => console.error('Failed to get adjacent videos:', err));
+
+    // Previous/Next navigation
+    prevBtn.addEventListener('click', () => {
+        if (adjacentVideos.prev) {
+            viewFile(adjacentVideos.prev.path, 'video', adjacentVideos.prev.name);
+        }
+    });
+
+    nextBtn.addEventListener('click', () => {
+        if (adjacentVideos.next) {
+            viewFile(adjacentVideos.next.path, 'video', adjacentVideos.next.name);
+        }
+    });
+
+    // Autoplay next video when current ends
+    video.addEventListener('ended', () => {
+        if (adjacentVideos.next) {
+            viewFile(adjacentVideos.next.path, 'video', adjacentVideos.next.name);
+        }
+    });
 
     // Function to load/reload subtitle tracks with time offset
     function loadSubtitleTracks(offset) {
