@@ -71,9 +71,11 @@ function createTranscodedVideoPlayer(encodedPath, name) {
                 <source src="/transcode/${encodedPath}" type="video/mp4">
             </video>
             <div id="customControls" style="background: rgba(0,0,0,0.8); padding: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                <button id="prevBtn" style="background: #555; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; display: none;" title="Previous">⏮</button>
+                <button id="prevBtn" style="background: #555; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; display: none;" title="Previous video">⏮</button>
+                <button id="skipBackBtn" style="background: #555; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;" title="Back 5s">-5</button>
                 <button id="playPauseBtn" style="background: #2196F3; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer;">Play</button>
-                <button id="nextBtn" style="background: #555; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; display: none;" title="Next">⏭</button>
+                <button id="skipFwdBtn" style="background: #555; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;" title="Forward 5s">+5</button>
+                <button id="nextBtn" style="background: #555; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; display: none;" title="Next video">⏭</button>
                 <span id="currentTime" style="color: white; font-size: 14px; min-width: 45px;">0:00</span>
                 <div id="seekBar" style="flex: 1; height: 8px; background: rgba(255,255,255,0.3); border-radius: 4px; cursor: pointer; position: relative; min-width: 100px;">
                     <div id="bufferedProgress" style="position: absolute; top: 0; height: 100%; background: rgba(255,255,255,0.5); border-radius: 4px; width: 0%;"></div>
@@ -96,6 +98,8 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     const playPauseBtn = document.getElementById('playPauseBtn');
     const prevBtn = document.getElementById('prevBtn');
     const nextBtn = document.getElementById('nextBtn');
+    const skipBackBtn = document.getElementById('skipBackBtn');
+    const skipFwdBtn = document.getElementById('skipFwdBtn');
     const seekBar = document.getElementById('seekBar');
     const seekProgress = document.getElementById('seekProgress');
     const bufferedProgress = document.getElementById('bufferedProgress');
@@ -264,6 +268,63 @@ function createTranscodedVideoPlayer(encodedPath, name) {
 
     video.addEventListener('play', () => playPauseBtn.textContent = 'Pause');
     video.addEventListener('pause', () => playPauseBtn.textContent = 'Play');
+
+    // Skip function
+    function skip(seconds) {
+        if (videoDuration === 0) return;
+
+        const currentActualTime = currentSeekTime + video.currentTime;
+        const newTime = Math.max(0, Math.min(videoDuration, currentActualTime + seconds));
+
+        const wasPlaying = !video.paused;
+        isSeeking = true;
+        video.pause();
+
+        currentSeekTime = newTime;
+        video.src = `/transcode/${encodedPath}?start_time=${newTime}&audio_track=${currentAudioTrack}`;
+        video.load();
+
+        if (subtitleTracks.length > 0) {
+            loadSubtitleTracks(newTime);
+        }
+
+        const percentage = newTime / videoDuration;
+        seekProgress.style.width = (percentage * 100) + '%';
+        currentTimeDisplay.textContent = formatTime(newTime);
+
+        if (wasPlaying) {
+            video.play().then(() => isSeeking = false).catch(() => isSeeking = false);
+        } else {
+            isSeeking = false;
+        }
+    }
+
+    // Skip buttons
+    skipBackBtn.addEventListener('click', () => skip(-5));
+    skipFwdBtn.addEventListener('click', () => skip(5));
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        // Only handle if video player is active (modal is open)
+        if (!document.getElementById('modal').classList.contains('active')) return;
+        // Don't handle if typing in input
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+        switch (e.key) {
+            case 'ArrowLeft':
+                e.preventDefault();
+                skip(-5);
+                break;
+            case 'ArrowRight':
+                e.preventDefault();
+                skip(5);
+                break;
+            case ' ':
+                e.preventDefault();
+                video.paused ? video.play() : video.pause();
+                break;
+        }
+    });
 
     // Time update
     video.addEventListener('timeupdate', () => {
