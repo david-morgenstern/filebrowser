@@ -75,9 +75,15 @@ def init_db():
                     file_size INTEGER,
                     first_watched TIMESTAMP NOT NULL,
                     last_watched TIMESTAMP NOT NULL,
-                    view_count INTEGER DEFAULT 1
+                    view_count INTEGER DEFAULT 1,
+                    playback_position REAL DEFAULT 0
                 )
             ''')
+            # Add playback_position column if it doesn't exist (migration)
+            try:
+                conn.execute('ALTER TABLE watch_history ADD COLUMN playback_position REAL DEFAULT 0')
+            except:
+                pass  # Column already exists
             conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_watched ON watch_history(ip_address, last_watched DESC)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_file_watched ON watch_history(file_path, last_watched DESC)')
             logger.info("Database initialized successfully")
@@ -171,6 +177,96 @@ def get_video_info(file_path):
         logger.error(f"Error getting video info: {e}")
         return None
 
+def get_audio_tracks(file_path):
+    """Get list of audio tracks from video file"""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-select_streams', 'a',
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+        if result.returncode != 0:
+            logger.error(f"ffprobe audio tracks failed for {file_path}")
+            return []
+
+        data = json.loads(result.stdout)
+        tracks = []
+
+        for i, stream in enumerate(data.get('streams', [])):
+            track_info = {
+                'index': i,
+                'stream_index': stream.get('index', i),
+                'codec': stream.get('codec_name', 'unknown'),
+                'channels': stream.get('channels', 2),
+                'sample_rate': stream.get('sample_rate', ''),
+                'language': stream.get('tags', {}).get('language', ''),
+                'title': stream.get('tags', {}).get('title', ''),
+            }
+
+            # Build display label
+            label_parts = []
+            if track_info['language']:
+                label_parts.append(track_info['language'].upper())
+            if track_info['title']:
+                label_parts.append(track_info['title'])
+            if track_info['channels']:
+                ch = track_info['channels']
+                ch_label = '5.1' if ch == 6 else '7.1' if ch == 8 else f'{ch}ch'
+                label_parts.append(ch_label)
+
+            track_info['label'] = ' - '.join(label_parts) if label_parts else f'Track {i + 1}'
+            tracks.append(track_info)
+
+        return tracks
+    except Exception as e:
+        logger.error(f"Error getting audio tracks: {e}")
+        return []
+
+def get_subtitle_tracks(file_path):
+    """Get list of subtitle tracks from video file"""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-select_streams', 's',
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+        if result.returncode != 0:
+            logger.error(f"ffprobe subtitle tracks failed for {file_path}")
+            return []
+
+        data = json.loads(result.stdout)
+        tracks = []
+
+        for i, stream in enumerate(data.get('streams', [])):
+            track_info = {
+                'index': i,
+                'stream_index': stream.get('index', i),
+                'codec': stream.get('codec_name', 'unknown'),
+                'language': stream.get('tags', {}).get('language', ''),
+                'title': stream.get('tags', {}).get('title', ''),
+            }
+
+            # Build display label
+            label_parts = []
+            if track_info['language']:
+                label_parts.append(track_info['language'].upper())
+            if track_info['title']:
+                label_parts.append(track_info['title'])
+            if not label_parts:
+                label_parts.append(f'Track {i + 1}')
+
+            track_info['label'] = ' - '.join(label_parts)
+            tracks.append(track_info)
+
+        return tracks
+    except Exception as e:
+        logger.error(f"Error getting subtitle tracks: {e}")
+        return []
+
 # ============================================
 # FastAPI App Setup
 # ============================================
@@ -203,6 +299,107 @@ async def get_video_metadata(file_path: str):
 
     return JSONResponse(info)
 
+@app.get('/api/audio-tracks/{file_path:path}')
+async def get_audio_tracks_endpoint(file_path: str):
+    """Get available audio tracks for a video file"""
+    full_path = os.path.join(DATA_DIR, file_path)
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail='File not found')
+
+    tracks = get_audio_tracks(full_path)
+    return JSONResponse({'tracks': tracks, 'count': len(tracks)})
+
+@app.get('/api/subtitle-tracks/{file_path:path}')
+async def get_subtitle_tracks_endpoint(file_path: str):
+    """Get available subtitle tracks for a video file"""
+    full_path = os.path.join(DATA_DIR, file_path)
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail='File not found')
+
+    tracks = get_subtitle_tracks(full_path)
+    return JSONResponse({'tracks': tracks, 'count': len(tracks)})
+
+@app.get('/api/adjacent-videos/{file_path:path}')
+async def get_adjacent_videos(file_path: str):
+    """Get previous and next video files in the same directory"""
+    full_path = os.path.join(DATA_DIR, file_path)
+    dir_path = os.path.dirname(full_path)
+    file_name = os.path.basename(full_path)
+
+    if not os.path.isdir(dir_path):
+        raise HTTPException(status_code=404, detail='Directory not found')
+
+    # Video extensions
+    video_exts = {'.mp4', '.m4v', '.webm', '.mkv', '.avi', '.mov', '.flv', '.wmv'}
+
+    # Get all video files in directory, sorted
+    videos = []
+    for f in os.listdir(dir_path):
+        ext = os.path.splitext(f)[1].lower()
+        if ext in video_exts:
+            videos.append(f)
+    videos.sort(key=lambda x: x.lower())
+
+    # Find current file index
+    try:
+        current_idx = videos.index(file_name)
+    except ValueError:
+        return JSONResponse({'prev': None, 'next': None})
+
+    # Get adjacent files
+    prev_file = videos[current_idx - 1] if current_idx > 0 else None
+    next_file = videos[current_idx + 1] if current_idx < len(videos) - 1 else None
+
+    # Build relative paths
+    dir_relative = os.path.dirname(file_path)
+    prev_path = os.path.join(dir_relative, prev_file) if prev_file else None
+    next_path = os.path.join(dir_relative, next_file) if next_file else None
+
+    return JSONResponse({
+        'prev': {'path': prev_path, 'name': prev_file} if prev_file else None,
+        'next': {'path': next_path, 'name': next_file} if next_file else None
+    })
+
+@app.get('/api/subtitles/{file_path:path}')
+async def get_subtitles_webvtt(file_path: str, track: int = 0, offset: float = 0):
+    """Extract subtitles as WebVTT format with optional time offset"""
+    full_path = os.path.join(DATA_DIR, file_path)
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail='File not found')
+
+    cmd = ['ffmpeg']
+
+    # Apply offset to shift subtitle timestamps (before input for fast seeking)
+    if offset > 0:
+        cmd.extend(['-ss', str(offset)])
+
+    cmd.extend([
+        '-i', full_path,
+        '-map', f'0:s:{track}',
+        '-c:s', 'webvtt',
+        '-f', 'webvtt',
+        'pipe:1'
+    ])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail='Failed to extract subtitles')
+
+        return Response(
+            content=result.stdout,
+            media_type='text/vtt',
+            headers={'Content-Type': 'text/vtt; charset=utf-8'}
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail='Subtitle extraction timed out')
+    except Exception as e:
+        logger.error(f"Subtitle extraction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get('/api/history')
 async def get_history(request: Request, limit: int = 50):
     """Get watch history for the current user's IP"""
@@ -221,6 +418,88 @@ async def get_history(request: Request, limit: int = 50):
     except Exception as e:
         logger.error(f"Failed to fetch history: {e}")
         return JSONResponse({'history': [], 'count': 0, 'error': str(e)})
+
+@app.post('/api/save-position/{file_path:path}')
+async def save_playback_position(file_path: str, request: Request, position: float = 0):
+    """Save playback position for a video"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    try:
+        with get_db() as conn:
+            conn.execute(
+                '''UPDATE watch_history SET playback_position = ?, last_watched = CURRENT_TIMESTAMP
+                   WHERE ip_address = ? AND file_path = ?''',
+                (position, client_ip, file_path)
+            )
+            return JSONResponse({'success': True})
+    except Exception as e:
+        logger.error(f"Failed to save position: {e}")
+        return JSONResponse({'success': False, 'error': str(e)})
+
+@app.get('/api/get-position/{file_path:path}')
+async def get_playback_position(file_path: str, request: Request):
+    """Get saved playback position for a video"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                '''SELECT playback_position FROM watch_history
+                   WHERE ip_address = ? AND file_path = ?''',
+                (client_ip, file_path)
+            ).fetchone()
+
+            if row:
+                return JSONResponse(
+                    {'position': row['playback_position']},
+                    headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+                )
+            return JSONResponse(
+                {'position': 0},
+                headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+            )
+    except Exception as e:
+        logger.error(f"Failed to get position: {e}")
+        return JSONResponse(
+            {'position': 0, 'error': str(e)},
+            headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+        )
+
+@app.get('/api/continue-watching')
+async def get_continue_watching(request: Request):
+    """Get the last watched video with its position"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                '''SELECT file_path, file_name, file_type, playback_position
+                   FROM watch_history
+                   WHERE ip_address = ? AND file_type = 'video' AND playback_position > 0
+                   ORDER BY last_watched DESC LIMIT 1''',
+                (client_ip,)
+            ).fetchone()
+
+            if row:
+                return JSONResponse(
+                    {
+                        'file_path': row['file_path'],
+                        'file_name': row['file_name'],
+                        'file_type': row['file_type'],
+                        'position': row['playback_position']
+                    },
+                    headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+                )
+            return JSONResponse(
+                {'file_path': None},
+                headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+            )
+    except Exception as e:
+        logger.error(f"Failed to get continue watching: {e}")
+        return JSONResponse(
+            {'file_path': None, 'error': str(e)},
+            headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+        )
 
 # ============================================
 # Streaming Endpoints
@@ -280,8 +559,8 @@ async def stream_media(file_path: str, request: Request):
     )
 
 @app.get('/transcode/{file_path:path}')
-async def transcode_stream(file_path: str, request: Request, start_time: float = 0):
-    """Transcode video on-the-fly with seeking support"""
+async def transcode_stream(file_path: str, request: Request, start_time: float = 0, audio_track: int = 0):
+    """Transcode video on-the-fly with seeking and audio track support"""
     full_path = os.path.join(DATA_DIR, file_path)
     client_ip = request.client.host if request.client else "unknown"
 
@@ -299,17 +578,52 @@ async def transcode_stream(file_path: str, request: Request, start_time: float =
         file_size = os.path.getsize(full_path)
         track_view(client_ip, file_path, file_name, file_type, file_size)
 
+    # Determine if we can copy video or need to transcode
+    compatible_codecs = ['h264', 'avc1', 'hevc', 'h265']
+    can_copy_video = video_info['codec'].lower() in compatible_codecs
+
     cmd = ['ffmpeg']
-    if start_time > 0:
-        cmd.extend(['-ss', str(start_time)])
+
+    if can_copy_video:
+        # For copy mode: use hybrid seek (fast coarse + accurate fine)
+        if start_time > 0:
+            coarse_seek = max(0, start_time - 30)
+            fine_seek = start_time - coarse_seek
+            if coarse_seek > 0:
+                cmd.extend(['-ss', str(coarse_seek)])
+            cmd.extend(['-i', full_path])
+            if fine_seek > 0:
+                cmd.extend(['-ss', str(fine_seek)])
+        else:
+            cmd.extend(['-i', full_path])
+        cmd.extend([
+            '-map', '0:v:0',
+            '-map', f'0:a:{audio_track}',
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-ac', '2',
+            '-avoid_negative_ts', 'make_zero',
+        ])
+    else:
+        # For transcode: -ss before input is fast and accurate
+        if start_time > 0:
+            cmd.extend(['-ss', str(start_time)])
+        cmd.extend(['-i', full_path])
+        cmd.extend([
+            '-map', '0:v:0',
+            '-map', f'0:a:{audio_track}',
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-tune', 'zerolatency',
+            '-crf', '28',
+            '-threads', '0',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-ac', '2',
+        ])
 
     cmd.extend([
-        '-i', full_path,
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-crf', '23',
-        '-c:a', 'aac',
-        '-b:a', '128k',
         '-movflags', 'frag_keyframe+empty_moov+faststart',
         '-f', 'mp4',
         'pipe:1'
