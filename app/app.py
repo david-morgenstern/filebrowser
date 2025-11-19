@@ -75,9 +75,15 @@ def init_db():
                     file_size INTEGER,
                     first_watched TIMESTAMP NOT NULL,
                     last_watched TIMESTAMP NOT NULL,
-                    view_count INTEGER DEFAULT 1
+                    view_count INTEGER DEFAULT 1,
+                    playback_position REAL DEFAULT 0
                 )
             ''')
+            # Add playback_position column if it doesn't exist (migration)
+            try:
+                conn.execute('ALTER TABLE watch_history ADD COLUMN playback_position REAL DEFAULT 0')
+            except:
+                pass  # Column already exists
             conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_watched ON watch_history(ip_address, last_watched DESC)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_file_watched ON watch_history(file_path, last_watched DESC)')
             logger.info("Database initialized successfully")
@@ -412,6 +418,88 @@ async def get_history(request: Request, limit: int = 50):
     except Exception as e:
         logger.error(f"Failed to fetch history: {e}")
         return JSONResponse({'history': [], 'count': 0, 'error': str(e)})
+
+@app.post('/api/save-position/{file_path:path}')
+async def save_playback_position(file_path: str, request: Request, position: float = 0):
+    """Save playback position for a video"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    try:
+        with get_db() as conn:
+            conn.execute(
+                '''UPDATE watch_history SET playback_position = ?, last_watched = CURRENT_TIMESTAMP
+                   WHERE ip_address = ? AND file_path = ?''',
+                (position, client_ip, file_path)
+            )
+            return JSONResponse({'success': True})
+    except Exception as e:
+        logger.error(f"Failed to save position: {e}")
+        return JSONResponse({'success': False, 'error': str(e)})
+
+@app.get('/api/get-position/{file_path:path}')
+async def get_playback_position(file_path: str, request: Request):
+    """Get saved playback position for a video"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                '''SELECT playback_position FROM watch_history
+                   WHERE ip_address = ? AND file_path = ?''',
+                (client_ip, file_path)
+            ).fetchone()
+
+            if row:
+                return JSONResponse(
+                    {'position': row['playback_position']},
+                    headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+                )
+            return JSONResponse(
+                {'position': 0},
+                headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+            )
+    except Exception as e:
+        logger.error(f"Failed to get position: {e}")
+        return JSONResponse(
+            {'position': 0, 'error': str(e)},
+            headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+        )
+
+@app.get('/api/continue-watching')
+async def get_continue_watching(request: Request):
+    """Get the last watched video with its position"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                '''SELECT file_path, file_name, file_type, playback_position
+                   FROM watch_history
+                   WHERE ip_address = ? AND file_type = 'video' AND playback_position > 0
+                   ORDER BY last_watched DESC LIMIT 1''',
+                (client_ip,)
+            ).fetchone()
+
+            if row:
+                return JSONResponse(
+                    {
+                        'file_path': row['file_path'],
+                        'file_name': row['file_name'],
+                        'file_type': row['file_type'],
+                        'position': row['playback_position']
+                    },
+                    headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+                )
+            return JSONResponse(
+                {'file_path': None},
+                headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+            )
+    except Exception as e:
+        logger.error(f"Failed to get continue watching: {e}")
+        return JSONResponse(
+            {'file_path': None, 'error': str(e)},
+            headers={'Cache-Control': 'no-store, no-cache, must-revalidate'}
+        )
 
 # ============================================
 # Streaming Endpoints

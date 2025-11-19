@@ -101,6 +101,9 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     const skipBackBtn = document.getElementById('skipBackBtn');
     const skipFwdBtn = document.getElementById('skipFwdBtn');
     const seekBar = document.getElementById('seekBar');
+
+    // Store data on video element for closeModal to access
+    video.dataset.encodedPath = encodedPath;
     const seekProgress = document.getElementById('seekProgress');
     const bufferedProgress = document.getElementById('bufferedProgress');
     const currentTimeDisplay = document.getElementById('currentTime');
@@ -116,6 +119,42 @@ function createTranscodedVideoPlayer(encodedPath, name) {
     let subtitleTracks = [];
     let selectedSubtitleTrack = -1;
     let adjacentVideos = { prev: null, next: null };
+
+    // Initialize data attributes for closeModal
+    video.dataset.seekTime = '0';
+    video.dataset.duration = '0';
+
+    // Save playback position (using sendBeacon for reliability)
+    function savePosition() {
+        const actualTime = currentSeekTime + video.currentTime;
+        if (actualTime > 0 && videoDuration > 0) {
+            // Use sendBeacon for more reliable saving (doesn't get cancelled on page unload)
+            const url = `/api/save-position/${encodedPath}?position=${actualTime}`;
+            if (navigator.sendBeacon) {
+                navigator.sendBeacon(url);
+            } else {
+                fetch(url, { method: 'POST', keepalive: true })
+                    .catch(err => console.error('Failed to save position:', err));
+            }
+        }
+    }
+
+    // Save position on pause
+    video.addEventListener('pause', savePosition);
+
+    // Reset position when video ends (finished watching)
+    video.addEventListener('ended', () => {
+        fetch(`/api/save-position/${encodedPath}?position=0`, { method: 'POST' });
+    });
+
+    // Save position before page unload
+    window.addEventListener('beforeunload', savePosition);
+
+    // Save position when tab becomes hidden (switching tabs, minimizing)
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) savePosition();
+    });
+
 
     // Fetch adjacent videos for navigation
     fetch('/api/adjacent-videos/' + encodedPath)
@@ -181,14 +220,16 @@ function createTranscodedVideoPlayer(encodedPath, name) {
         }, 200);
     }
 
-    // Fetch metadata, audio tracks, and subtitle tracks
+    // Fetch metadata, audio tracks, subtitle tracks, and saved position
     Promise.all([
         fetch('/api/video-info/' + encodedPath).then(r => r.json()),
         fetch('/api/audio-tracks/' + encodedPath).then(r => r.json()),
-        fetch('/api/subtitle-tracks/' + encodedPath).then(r => r.json())
+        fetch('/api/subtitle-tracks/' + encodedPath).then(r => r.json()),
+        fetch('/api/get-position/' + encodedPath).then(r => r.json())
     ])
-        .then(([metadata, audioData, subtitleData]) => {
+        .then(([metadata, audioData, subtitleData, positionData]) => {
             videoDuration = metadata.duration;
+            video.dataset.duration = videoDuration;
             totalTimeDisplay.textContent = formatTime(videoDuration);
 
             const copyOrTranscode = metadata.needs_transcode ? 'Transcoding' : 'Remuxing';
@@ -219,6 +260,57 @@ function createTranscodedVideoPlayer(encodedPath, name) {
                 // Load initial subtitle tracks
                 loadSubtitleTracks(0);
             }
+
+            // Show resume banner (will fetch fresh position when clicked)
+            // Create resume banner
+            const resumeBanner = document.createElement('div');
+            resumeBanner.id = 'resumeBanner';
+            resumeBanner.style.cssText = 'background: rgba(33, 150, 243, 0.9); padding: 8px 15px; display: flex; align-items: center; justify-content: space-between; color: white; font-size: 14px;';
+            resumeBanner.innerHTML = `
+                <span id="resumeText">Resume available</span>
+                <div>
+                    <button id="resumeBtn" style="background: white; color: #2196F3; border: none; padding: 5px 12px; border-radius: 3px; cursor: pointer; margin-right: 8px; font-weight: bold;">Resume</button>
+                    <button id="dismissResume" style="background: transparent; color: white; border: 1px solid white; padding: 5px 12px; border-radius: 3px; cursor: pointer;">Start Over</button>
+                </div>
+            `;
+
+            // Insert after notice
+            notice.parentNode.insertBefore(resumeBanner, notice.nextSibling);
+
+            // Update text with initial position if available
+            if (positionData.position > 10) {
+                document.getElementById('resumeText').textContent = `Resume from ${formatTime(positionData.position)}`;
+            } else {
+                resumeBanner.style.display = 'none';
+            }
+
+            // Resume button handler - fetches fresh position when clicked
+            document.getElementById('resumeBtn').addEventListener('click', async (e) => {
+                e.stopPropagation();
+
+                // Fetch fresh position from database
+                const freshData = await fetch(`/api/get-position/${encodedPath}?_=${Date.now()}`).then(r => r.json());
+                const resumeTime = freshData.position;
+
+                if (resumeTime > 0) {
+                    currentSeekTime = resumeTime; video.dataset.seekTime = resumeTime;
+                    video.src = `/transcode/${encodedPath}?start_time=${resumeTime}&audio_track=${currentAudioTrack}`;
+                    video.load();
+                    if (subtitleTracks.length > 0) {
+                        loadSubtitleTracks(resumeTime);
+                    }
+                    seekProgress.style.width = ((resumeTime / videoDuration) * 100) + '%';
+                    currentTimeDisplay.textContent = formatTime(resumeTime);
+                    video.play().catch(() => {});
+                }
+                resumeBanner.remove();
+            });
+
+            // Dismiss button handler
+            document.getElementById('dismissResume').addEventListener('click', (e) => {
+                e.stopPropagation();
+                resumeBanner.remove();
+            });
         })
         .catch(err => {
             console.error('Failed to get metadata:', err);
@@ -232,7 +324,7 @@ function createTranscodedVideoPlayer(encodedPath, name) {
         const currentTime = currentSeekTime + video.currentTime;
 
         video.pause();
-        currentSeekTime = currentTime;
+        currentSeekTime = currentTime; video.dataset.seekTime = currentTime;
         video.src = `/transcode/${encodedPath}?start_time=${currentTime}&audio_track=${currentAudioTrack}`;
         video.load();
 
@@ -280,7 +372,7 @@ function createTranscodedVideoPlayer(encodedPath, name) {
         isSeeking = true;
         video.pause();
 
-        currentSeekTime = newTime;
+        currentSeekTime = newTime; video.dataset.seekTime = newTime;
         video.src = `/transcode/${encodedPath}?start_time=${newTime}&audio_track=${currentAudioTrack}`;
         video.load();
 
@@ -356,7 +448,7 @@ function createTranscodedVideoPlayer(encodedPath, name) {
         isSeeking = true;
         video.pause();
 
-        currentSeekTime = seekToTime;
+        currentSeekTime = seekToTime; video.dataset.seekTime = seekToTime;
         video.src = `/transcode/${encodedPath}?start_time=${seekToTime}&audio_track=${currentAudioTrack}`;
         video.load();
 
@@ -531,6 +623,19 @@ function closeModal() {
     const audio = document.getElementById('audioPlayer');
 
     if (video) {
+        // Save position before clearing (video stores these as data attributes)
+        if (video.dataset.encodedPath && video.dataset.seekTime !== undefined) {
+            const actualTime = parseFloat(video.dataset.seekTime) + video.currentTime;
+            const duration = parseFloat(video.dataset.duration) || 0;
+            if (actualTime > 0 && duration > 0) {
+                const url = `/api/save-position/${video.dataset.encodedPath}?position=${actualTime}`;
+                if (navigator.sendBeacon) {
+                    navigator.sendBeacon(url);
+                } else {
+                    fetch(url, { method: 'POST', keepalive: true });
+                }
+            }
+        }
         video.pause();
         video.src = '';
     }
@@ -541,6 +646,26 @@ function closeModal() {
 
     modal.classList.remove('active');
     content.innerHTML = '';
+}
+
+// Continue watching - resume last video
+async function continueWatching() {
+    try {
+        // Small delay to ensure any pending saves complete
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        const response = await fetch('/api/continue-watching');
+        const data = await response.json();
+
+        if (data.file_path) {
+            viewFile(data.file_path, data.file_type, data.file_name);
+        } else {
+            alert('No video to continue. Start watching something first!');
+        }
+    } catch (error) {
+        console.error('Failed to get continue watching:', error);
+        alert('Failed to get continue watching data');
+    }
 }
 
 // Watch history
