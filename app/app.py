@@ -91,18 +91,19 @@ def init_db():
         logger.error(f"Failed to initialize database: {e}")
 
 def track_view(ip_address: str, file_path: str, file_name: str, file_type: str, file_size: int):
-    """Track a file view in the database"""
+    """Track a file view in the database (global, not per-IP)"""
     try:
         with get_db() as conn:
+            # Single-user mode: find existing record by file_path only
             existing = conn.execute(
-                'SELECT id, view_count FROM watch_history WHERE ip_address = ? AND file_path = ?',
-                (ip_address, file_path)
+                'SELECT id, view_count FROM watch_history WHERE file_path = ?',
+                (file_path,)
             ).fetchone()
 
             if existing:
                 conn.execute(
-                    'UPDATE watch_history SET last_watched = ?, view_count = ? WHERE id = ?',
-                    (datetime.now(), existing['view_count'] + 1, existing['id'])
+                    'UPDATE watch_history SET last_watched = ?, view_count = ?, ip_address = ? WHERE id = ?',
+                    (datetime.now(), existing['view_count'] + 1, ip_address, existing['id'])
                 )
             else:
                 conn.execute(
@@ -402,15 +403,13 @@ async def get_subtitles_webvtt(file_path: str, track: int = 0, offset: float = 0
 
 @app.get('/api/history')
 async def get_history(request: Request, limit: int = 50):
-    """Get watch history for the current user's IP"""
-    client_ip = request.client.host if request.client else "unknown"
-
+    """Get watch history (global for single-user mode)"""
     try:
         with get_db() as conn:
             rows = conn.execute(
                 '''SELECT file_path, file_name, file_type, file_size, first_watched, last_watched, view_count
-                   FROM watch_history WHERE ip_address = ? ORDER BY last_watched DESC LIMIT ?''',
-                (client_ip, limit)
+                   FROM watch_history ORDER BY last_watched DESC LIMIT ?''',
+                (limit,)
             ).fetchall()
 
             history = [dict(row) for row in rows]
@@ -421,15 +420,13 @@ async def get_history(request: Request, limit: int = 50):
 
 @app.post('/api/save-position/{file_path:path}')
 async def save_playback_position(file_path: str, request: Request, position: float = 0):
-    """Save playback position for a video"""
-    client_ip = request.client.host if request.client else "unknown"
-
+    """Save playback position for a video (global for single-user mode)"""
     try:
         with get_db() as conn:
             conn.execute(
                 '''UPDATE watch_history SET playback_position = ?, last_watched = CURRENT_TIMESTAMP
-                   WHERE ip_address = ? AND file_path = ?''',
-                (position, client_ip, file_path)
+                   WHERE file_path = ?''',
+                (position, file_path)
             )
             return JSONResponse({'success': True})
     except Exception as e:
@@ -438,15 +435,13 @@ async def save_playback_position(file_path: str, request: Request, position: flo
 
 @app.get('/api/get-position/{file_path:path}')
 async def get_playback_position(file_path: str, request: Request):
-    """Get saved playback position for a video"""
-    client_ip = request.client.host if request.client else "unknown"
-
+    """Get saved playback position for a video (global for single-user mode)"""
     try:
         with get_db() as conn:
             row = conn.execute(
                 '''SELECT playback_position FROM watch_history
-                   WHERE ip_address = ? AND file_path = ?''',
-                (client_ip, file_path)
+                   WHERE file_path = ?''',
+                (file_path,)
             ).fetchone()
 
             if row:
@@ -467,17 +462,14 @@ async def get_playback_position(file_path: str, request: Request):
 
 @app.get('/api/continue-watching')
 async def get_continue_watching(request: Request):
-    """Get the last watched video with its position"""
-    client_ip = request.client.host if request.client else "unknown"
-
+    """Get the last watched video with its position (global for single-user mode)"""
     try:
         with get_db() as conn:
             row = conn.execute(
                 '''SELECT file_path, file_name, file_type, playback_position
                    FROM watch_history
-                   WHERE ip_address = ? AND file_type = 'video' AND playback_position > 0
+                   WHERE file_type = 'video' AND playback_position > 0
                    ORDER BY last_watched DESC LIMIT 1''',
-                (client_ip,)
             ).fetchone()
 
             if row:
